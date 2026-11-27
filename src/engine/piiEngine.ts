@@ -404,6 +404,47 @@ function analyzeCsvColumns(text: string, matches: DetectedEntity[]): CsvColumnRi
   }));
 }
 
+function isWordOrDigitBefore(text: string, index: number, extraBlocked = ''): boolean {
+  if (index <= 0) return false;
+  const ch = text[index - 1];
+  return /[\dA-Za-z]/.test(ch) || extraBlocked.includes(ch);
+}
+
+function isWordOrDigitAfter(text: string, index: number, extraBlocked = ''): boolean {
+  if (index >= text.length) return false;
+  const ch = text[index];
+  return /[\dA-Za-z]/.test(ch) || extraBlocked.includes(ch);
+}
+
+/**
+ * Checks whether a 4-4-4 Aadhaar candidate is strictly the prefix of an isolated
+ * 4-group (4-4-4-4) 16-digit block so non-Luhn 16-digit IDs aren't sliced,
+ * while 7-group (4-4-4 + 4-4-4-4) Aadhaar+Card sequences remain detectable.
+ */
+function isIsolatedFourGroupPrefix(text: string, start: number, end: number, sep: string): boolean {
+  const isFourDigits = (idx: number) => /^\d{4}$/.test(text.slice(idx, idx + 4));
+  let leading = 0;
+  let pos = start;
+  while (pos >= 5 && text[pos - 1] === sep && isFourDigits(pos - 5) && !isWordOrDigitBefore(text, pos - 5, '-')) {
+    leading++;
+    pos -= 5;
+  }
+
+  let trailing = 0;
+  pos = end;
+  while (
+    pos + 5 <= text.length &&
+    text[pos] === sep &&
+    isFourDigits(pos + 1) &&
+    !isWordOrDigitAfter(text, pos + 5, '-')
+  ) {
+    trailing++;
+    pos += 5;
+  }
+
+  return leading + 3 + trailing === 4;
+}
+
 export interface DetectOptions {
   enabledTypes?: Partial<EnabledEntityMap>;
   strictAadhaarVerhoeff?: boolean;
@@ -431,43 +472,110 @@ export function detectPII(
 
   const locate = buildLineLocator(text);
   const candidates: Omit<DetectedEntity, 'id'>[] = [];
-  const rejected: RejectedCandidate[] = [];
-  const reservedCardRanges: Array<{ start: number; end: number }> = [];
+  const candidateKeys = new Set<string>();
+  const rejectedCandidates: RejectedCandidate[] = [];
+  const rejectedKeys = new Set<string>();
   let customRegexError: string | null = null;
 
-  // 1. Credit Cards (Luhn validated)
-  if (enabled.CREDIT_CARD) {
-    findRegexMatches(text, /(?<![\dA-Za-z+])(?:\d[ -]?){12,18}\d(?![\dA-Za-z])/g, (m) => {
-      const raw = m[0];
-      const digits = raw.replace(/\D/g, '');
-      if (digits.length < 13 || digits.length > 19) return;
-      const start = m.index;
-      const end = start + raw.length;
-      const pos = locate(start);
+  const pushCandidate = (item: Omit<DetectedEntity, 'id'>) => {
+    const key = `${item.type}:${item.start}:${item.end}`;
+    if (candidateKeys.has(key)) return;
+    candidateKeys.add(key);
+    candidates.push(item);
+  };
 
-      if (isValidLuhn(raw)) {
-        candidates.push({
-          type: 'CREDIT_CARD',
-          value: raw,
-          start,
-          end,
-          line: pos.line,
-          column: pos.column,
-          validation: `Luhn Valid (${detectCardNetwork(raw)})`,
-        });
-      } else if (isCardLikeShape(raw)) {
-        rejected.push({
-          type: 'CREDIT_CARD',
-          value: raw,
-          start,
-          end,
-          line: pos.line,
-          column: pos.column,
-          reason: 'Failed Luhn checksum (false positive prevented)',
-        });
-        reservedCardRanges.push({ start, end });
+  const pushRejected = (item: RejectedCandidate) => {
+    const key = `${item.type}:${item.start}:${item.end}`;
+    if (rejectedKeys.has(key)) return;
+    rejectedKeys.add(key);
+    rejectedCandidates.push(item);
+  };
+
+  // 1. Credit Cards (multi-start, exact group sizes: 4-4-4-4, 4-4-4-4-3, 4-4-4-1, 4-6-5, 4-6-4, and 13-19 contiguous digits)
+  if (enabled.CREDIT_CARD) {
+    const cardGroupRegexes: RegExp[] = [
+      // 4-4-4-4 (16 digits)
+      /^\d{4}([ -])\d{4}\1\d{4}\1\d{4}/,
+      // 4-4-4-4-3 (19 digits)
+      /^\d{4}([ -])\d{4}\1\d{4}\1\d{4}\1\d{3}/,
+      // 4-4-4-1 (13 digits)
+      /^\d{4}([ -])\d{4}\1\d{4}\1\d/,
+      // 4-6-5 (Amex 15 digits)
+      /^\d{4}([ -])\d{6}\1\d{5}/,
+      // 4-6-4 (Diners 14 digits)
+      /^\d{4}([ -])\d{6}\1\d{4}/,
+    ];
+
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (ch < '0' || ch > '9') continue;
+      if (isWordOrDigitBefore(text, i, '+')) continue;
+
+      const slice = text.slice(i, i + 25);
+
+      // Contiguous 13–19 digits
+      const contig = slice.match(/^\d{13,19}/);
+      if (contig) {
+        const raw = contig[0];
+        const end = i + raw.length;
+        if (!isWordOrDigitAfter(text, end)) {
+          const pos = locate(i);
+          if (isValidLuhn(raw)) {
+            pushCandidate({
+              type: 'CREDIT_CARD',
+              value: raw,
+              start: i,
+              end,
+              line: pos.line,
+              column: pos.column,
+              validation: `Luhn Valid (${detectCardNetwork(raw)})`,
+            });
+          } else {
+            pushRejected({
+              type: 'CREDIT_CARD',
+              value: raw,
+              start: i,
+              end,
+              line: pos.line,
+              column: pos.column,
+              reason: 'Failed Luhn checksum (false positive prevented)',
+            });
+          }
+        }
       }
-    });
+
+      // Grouped card shapes (try every pattern at this valid start offset)
+      for (const re of cardGroupRegexes) {
+        const m = slice.match(re);
+        if (!m) continue;
+        const raw = m[0];
+        const end = i + raw.length;
+        if (isWordOrDigitAfter(text, end)) continue;
+
+        const pos = locate(i);
+        if (isValidLuhn(raw)) {
+          pushCandidate({
+            type: 'CREDIT_CARD',
+            value: raw,
+            start: i,
+            end,
+            line: pos.line,
+            column: pos.column,
+            validation: `Luhn Valid (${detectCardNetwork(raw)})`,
+          });
+        } else if (isCardLikeShape(raw)) {
+          pushRejected({
+            type: 'CREDIT_CARD',
+            value: raw,
+            start: i,
+            end,
+            line: pos.line,
+            column: pos.column,
+            reason: 'Failed Luhn checksum (false positive prevented)',
+          });
+        }
+      }
+    }
   }
 
   // 2. Emails
@@ -478,7 +586,7 @@ export function detectPII(
       (m) => {
         const start = m.index;
         const pos = locate(start);
-        candidates.push({
+        pushCandidate({
           type: 'EMAIL',
           value: m[0],
           start,
@@ -499,7 +607,7 @@ export function detectPII(
       (m) => {
         const start = m.index;
         const pos = locate(start);
-        candidates.push({
+        pushCandidate({
           type: 'IP_ADDRESS',
           value: m[0],
           start,
@@ -518,7 +626,7 @@ export function detectPII(
         if (!isValidIPv6(m[0])) return;
         const start = m.index;
         const pos = locate(start);
-        candidates.push({
+        pushCandidate({
           type: 'IP_ADDRESS',
           value: m[0],
           start,
@@ -538,7 +646,7 @@ export function detectPII(
       const start = m.index;
       const pos = locate(start);
       const holder = m[0][3];
-      candidates.push({
+      pushCandidate({
         type: 'PAN',
         value: m[0],
         start,
@@ -552,38 +660,45 @@ export function detectPII(
     });
   }
 
-  const insideReservedCard = (start: number, end: number) =>
-    reservedCardRanges.some((r) => start >= r.start && end <= r.end);
-
-  // 5. Indian Aadhaar (12 digits starting 2-9, optional Verhoeff strictness)
+  // 5. Indian Aadhaar (multi-start, exact 4-4-4 and 12-digit forms, optional Verhoeff strictness)
   if (enabled.AADHAAR) {
-    findRegexMatches(
-      text,
-      /(?<![\dA-Za-z-])(?:[2-9]\d{3} \d{4} \d{4}|[2-9]\d{3}-\d{4}-\d{4}|[2-9]\d{11})(?![\dA-Za-z-]| \d{4}|-\d{4})/g,
-      (m) => {
-        const start = m.index;
-        const end = start + m[0].length;
-        if (insideReservedCard(start, end)) return;
-        const pos = locate(start);
-        const verhoeffOk = isValidVerhoeff(m[0]);
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (ch < '2' || ch > '9') continue;
+      if (isWordOrDigitBefore(text, i, '-')) continue;
 
+      const slice = text.slice(i, i + 15);
+      const grouped = slice.match(/^[2-9]\d{3}([ -])\d{4}\1\d{4}/);
+      const contig = slice.match(/^[2-9]\d{11}/);
+
+      const candidatesHere: Array<{ raw: string; sep: string | null }> = [];
+      if (grouped) candidatesHere.push({ raw: grouped[0], sep: grouped[1] });
+      if (contig) candidatesHere.push({ raw: contig[0], sep: null });
+
+      for (const { raw, sep } of candidatesHere) {
+        const end = i + raw.length;
+        if (isWordOrDigitAfter(text, end, '-')) continue;
+        if (sep && isIsolatedFourGroupPrefix(text, i, end, sep)) continue;
+
+        const pos = locate(i);
+        const verhoeffOk = isValidVerhoeff(raw);
         if (strictVerhoeff && !verhoeffOk) {
-          rejected.push({
+          pushRejected({
             type: 'AADHAAR',
-            value: m[0],
-            start,
+            value: raw,
+            start: i,
             end,
             line: pos.line,
             column: pos.column,
             reason: 'Failed Verhoeff checksum (Strict Aadhaar mode)',
           });
-          return;
+          continue;
         }
 
-        candidates.push({
+        pushCandidate({
           type: 'AADHAAR',
-          value: m[0],
-          start,
+          value: raw,
+          start: i,
           end,
           line: pos.line,
           column: pos.column,
@@ -592,37 +707,69 @@ export function detectPII(
             : '12-digit UIDAI format (unverified checksum)',
         });
       }
-    );
+    }
   }
 
-  // 6. Phone Numbers
+  // 6. Phone Numbers (multi-start + multi-group prefixes for E.164 so trailing entities aren't swallowed)
   if (enabled.PHONE) {
-    const phonePatterns = [
-      /(?<![\dA-Za-z+])\+\d{1,3}(?:[ .-]?\(?\d{1,10}\)?){1,5}(?![\dA-Za-z])/g,
+    // 6a. International '+' prefixed phones: emit every valid 1..5 group prefix with 10..15 digits
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] !== '+') continue;
+      if (isWordOrDigitBefore(text, i, '+')) continue;
+
+      const slice = text.slice(i, i + 32);
+      const ccMatch = slice.match(/^\+\d{1,3}/);
+      if (!ccMatch) continue;
+
+      let curLen = ccMatch[0].length;
+      for (let g = 0; g < 5; g++) {
+        const rest = slice.slice(curLen);
+        const nextGroup = rest.match(/^[ .-]?\(?\d{1,10}\)?/);
+        if (!nextGroup) break;
+        curLen += nextGroup[0].length;
+        const end = i + curLen;
+        if (isWordOrDigitAfter(text, end)) continue;
+
+        const raw = slice.slice(0, curLen);
+        const digits = raw.replace(/\D/g, '');
+        if (digits.length >= 10 && digits.length <= 15) {
+          const pos = locate(i);
+          pushCandidate({
+            type: 'PHONE',
+            value: raw,
+            start: i,
+            end,
+            line: pos.line,
+            column: pos.column,
+            validation: 'International E.164 phone',
+          });
+        }
+      }
+    }
+
+    // 6b. Local & formatted phone patterns (multi-start via regex without greedy over-consumption)
+    const localPhonePatterns = [
       /(?<![\dA-Za-z(])\(\d{3,5}\)[ .-]?\d{3,4}[ .-]?\d{4}(?![\dA-Za-z])/g,
       /(?<![\dA-Za-z-])(?:\d{5}[ .-]\d{5}|\d{3}[ .-]\d{3}[ .-]\d{4}|0\d{2,4}[ .-]\d{6,8})(?![\dA-Za-z-])/g,
       /(?<![\dA-Za-z+-])(?:0?[6-9]\d{9})(?![\dA-Za-z-])/g,
     ];
 
-    for (const pattern of phonePatterns) {
+    for (const pattern of localPhonePatterns) {
       findRegexMatches(text, pattern, (m) => {
         const raw = m[0];
         const digits = raw.replace(/\D/g, '');
         if (digits.length < 10 || digits.length > 15) return;
         const start = m.index;
         const end = start + raw.length;
-        if (insideReservedCard(start, end)) return;
         const pos = locate(start);
-        candidates.push({
+        pushCandidate({
           type: 'PHONE',
           value: raw,
           start,
           end,
           line: pos.line,
           column: pos.column,
-          validation: raw.trim().startsWith('+')
-            ? 'International E.164 phone'
-            : '10+ digit phone format',
+          validation: '10+ digit phone format',
         });
       });
     }
@@ -637,7 +784,7 @@ export function detectPII(
         if (m[0].includes('\n')) return;
         const start = m.index;
         const pos = locate(start);
-        candidates.push({
+        pushCandidate({
           type: 'CUSTOM',
           value: m[0],
           start,
@@ -652,33 +799,126 @@ export function detectPII(
     }
   }
 
-  // Deterministic overlap resolution
-  candidates.sort((a, b) => {
+  // Filter out allowlisted values before optimal non-overlapping selection
+  const activeCandidates: Omit<DetectedEntity, 'id'>[] = [];
+  const ignoredSpans: Array<{ start: number; end: number }> = [];
+  for (const c of candidates) {
+    if (ignoredSet.has(c.value.trim().toLowerCase())) {
+      ignoredSpans.push({ start: c.start, end: c.end });
+    } else {
+      activeCandidates.push(c);
+    }
+  }
+
+  // Count distinct non-overlapping ignored spans
+  ignoredSpans.sort((a, b) => a.start - b.start || a.end - b.end);
+  let ignoredCount = 0;
+  let lastIgnoredEnd = -1;
+  for (const sp of ignoredSpans) {
+    if (sp.start >= lastIgnoredEnd) {
+      ignoredCount++;
+      lastIgnoredEnd = sp.end;
+    }
+  }
+
+  // Optimal Weighted Interval Scheduling (DP):
+  // Maximize (matched entity count, matched characters, sum of negative entity priority)
+  // so an over-long candidate never drops an adjacent entity.
+  activeCandidates.sort((a, b) => {
+    if (a.end !== b.end) return a.end - b.end;
     if (a.start !== b.start) return a.start - b.start;
-    const pa = ENTITY_META[a.type].priority;
-    const pb = ENTITY_META[b.type].priority;
-    if (pa !== pb) return pa - pb;
-    return b.end - b.start - (a.end - a.start);
+    return ENTITY_META[a.type].priority - ENTITY_META[b.type].priority;
   });
 
+  const n = activeCandidates.length;
   const matches: DetectedEntity[] = [];
-  let lastEnd = -1;
-  let seq = 0;
-  let ignoredCount = 0;
 
-  for (const candidate of candidates) {
-    if (candidate.start >= lastEnd) {
-      if (ignoredSet.has(candidate.value.trim().toLowerCase())) {
-        ignoredCount++;
-        lastEnd = candidate.end;
-        continue;
+  if (n > 0) {
+    interface DPState {
+      count: number;
+      chars: number;
+      prioScore: number;
+      take: boolean;
+      prevIdx: number;
+    }
+
+    const dp: DPState[] = new Array(n);
+    const isBetter = (a: DPState, b: DPState): boolean => {
+      if (a.count !== b.count) return a.count > b.count;
+      if (a.chars !== b.chars) return a.chars > b.chars;
+      return a.prioScore > b.prioScore;
+    };
+
+    const findLastNonOverlapping = (idx: number): number => {
+      const targetStart = activeCandidates[idx].start;
+      let lo = 0;
+      let hi = idx - 1;
+      let ans = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (activeCandidates[mid].end <= targetStart) {
+          ans = mid;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
       }
-      seq++;
+      return ans;
+    };
+
+    for (let i = 0; i < n; i++) {
+      const c = activeCandidates[i];
+      const len = c.end - c.start;
+      const prio = -ENTITY_META[c.type].priority;
+      const pIdx = findLastNonOverlapping(i);
+
+      const takeState: DPState = {
+        count: (pIdx >= 0 ? dp[pIdx].count : 0) + 1,
+        chars: (pIdx >= 0 ? dp[pIdx].chars : 0) + len,
+        prioScore: (pIdx >= 0 ? dp[pIdx].prioScore : 0) + prio,
+        take: true,
+        prevIdx: pIdx,
+      };
+
+      const skipState: DPState =
+        i > 0
+          ? { ...dp[i - 1], take: false, prevIdx: i - 1 }
+          : { count: 0, chars: 0, prioScore: 0, take: false, prevIdx: -1 };
+
+      dp[i] = isBetter(takeState, skipState) ? takeState : skipState;
+    }
+
+    const chosen: Omit<DetectedEntity, 'id'>[] = [];
+    let cur = n - 1;
+    while (cur >= 0) {
+      if (dp[cur].take) {
+        chosen.push(activeCandidates[cur]);
+        cur = dp[cur].prevIdx;
+      } else {
+        cur = dp[cur].prevIdx;
+      }
+    }
+    chosen.reverse();
+
+    chosen.forEach((c, idx) => {
       matches.push({
-        ...candidate,
-        id: `ent_${seq}_${candidate.start}`,
+        ...c,
+        id: `ent_${idx + 1}_${c.start}`,
       });
-      lastEnd = candidate.end;
+    });
+  }
+
+  // Keep only rejected candidates that do not overlap any accepted match, deduplicated cleanly
+  const nonOverlappingRejected = rejectedCandidates
+    .filter((r) => !matches.some((m) => r.start < m.end && r.end > m.start))
+    .sort((a, b) => a.start - b.start || b.end - b.start - (a.end - a.start));
+
+  const rejected: RejectedCandidate[] = [];
+  let lastRejEnd = -1;
+  for (const r of nonOverlappingRejected) {
+    if (r.start >= lastRejEnd) {
+      rejected.push(r);
+      lastRejEnd = r.end;
     }
   }
 

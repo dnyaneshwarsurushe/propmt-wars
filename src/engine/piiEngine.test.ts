@@ -154,3 +154,172 @@ describe('Sample Datasets, Risk Scoring & CSV Column Profiling', () => {
     });
   });
 });
+
+describe('Adjacent Entities & Non-Suppressing Rejected Spans', () => {
+  const PHONE_1 = '9876543210';
+  const PHONE_E164 = '+91 98765 43210';
+  const CARD_4444 = '4111 1111 1111 1111';
+  const CARD_AMEX = '3782 822463 10005';
+  const AADHAAR_444 = '2341 2341 2346';
+  const AADHAAR_12 = '234123412346';
+  const PAN = 'ABCDE1234F';
+
+  const adjacentPairs: Array<{
+    name: string;
+    input: string;
+    expected: Array<{ type: string; value: string }>;
+  }> = [
+    // Phone & Card (both orders)
+    {
+      name: 'phone + card (4-4-4-4)',
+      input: `${PHONE_1} ${CARD_4444}`,
+      expected: [
+        { type: 'PHONE', value: PHONE_1 },
+        { type: 'CREDIT_CARD', value: CARD_4444 },
+      ],
+    },
+    {
+      name: 'E.164 phone + Amex card (4-6-5)',
+      input: `${PHONE_E164} ${CARD_AMEX}`,
+      expected: [
+        { type: 'PHONE', value: PHONE_E164 },
+        { type: 'CREDIT_CARD', value: CARD_AMEX },
+      ],
+    },
+    {
+      name: 'card (4-4-4-4) + phone',
+      input: `${CARD_4444} ${PHONE_1}`,
+      expected: [
+        { type: 'CREDIT_CARD', value: CARD_4444 },
+        { type: 'PHONE', value: PHONE_1 },
+      ],
+    },
+    {
+      name: 'Amex card (4-6-5) + E.164 phone',
+      input: `${CARD_AMEX} ${PHONE_E164}`,
+      expected: [
+        { type: 'CREDIT_CARD', value: CARD_AMEX },
+        { type: 'PHONE', value: PHONE_E164 },
+      ],
+    },
+    // Phone & Aadhaar (both orders)
+    {
+      name: 'phone + Aadhaar (4-4-4)',
+      input: `${PHONE_1} ${AADHAAR_444}`,
+      expected: [
+        { type: 'PHONE', value: PHONE_1 },
+        { type: 'AADHAAR', value: AADHAAR_444 },
+      ],
+    },
+    {
+      name: 'E.164 phone + Aadhaar (12-digit)',
+      input: `${PHONE_E164} ${AADHAAR_12}`,
+      expected: [
+        { type: 'PHONE', value: PHONE_E164 },
+        { type: 'AADHAAR', value: AADHAAR_12 },
+      ],
+    },
+    {
+      name: 'Aadhaar (4-4-4) + phone',
+      input: `${AADHAAR_444} ${PHONE_1}`,
+      expected: [
+        { type: 'AADHAAR', value: AADHAAR_444 },
+        { type: 'PHONE', value: PHONE_1 },
+      ],
+    },
+    {
+      name: 'Aadhaar (12-digit) + E.164 phone',
+      input: `${AADHAAR_12} ${PHONE_E164}`,
+      expected: [
+        { type: 'AADHAAR', value: AADHAAR_12 },
+        { type: 'PHONE', value: PHONE_E164 },
+      ],
+    },
+    // Phone & PAN (both orders)
+    {
+      name: 'phone + PAN',
+      input: `${PHONE_1} ${PAN}`,
+      expected: [
+        { type: 'PHONE', value: PHONE_1 },
+        { type: 'PAN', value: PAN },
+      ],
+    },
+    {
+      name: 'PAN + phone',
+      input: `${PAN} ${PHONE_1}`,
+      expected: [
+        { type: 'PAN', value: PAN },
+        { type: 'PHONE', value: PHONE_1 },
+      ],
+    },
+    // Card & Aadhaar (both orders)
+    {
+      name: 'card (4-4-4-4) + Aadhaar (4-4-4)',
+      input: `${CARD_4444} ${AADHAAR_444}`,
+      expected: [
+        { type: 'CREDIT_CARD', value: CARD_4444 },
+        { type: 'AADHAAR', value: AADHAAR_444 },
+      ],
+    },
+    {
+      name: 'Aadhaar (4-4-4) + card (4-4-4-4)',
+      input: `${AADHAAR_444} ${CARD_4444}`,
+      expected: [
+        { type: 'AADHAAR', value: AADHAAR_444 },
+        { type: 'CREDIT_CARD', value: CARD_4444 },
+      ],
+    },
+    // Card & PAN (both orders)
+    {
+      name: 'card (4-4-4-4) + PAN',
+      input: `${CARD_4444} ${PAN}`,
+      expected: [
+        { type: 'CREDIT_CARD', value: CARD_4444 },
+        { type: 'PAN', value: PAN },
+      ],
+    },
+    {
+      name: 'PAN + card (4-4-4-4)',
+      input: `${PAN} ${CARD_4444}`,
+      expected: [
+        { type: 'PAN', value: PAN },
+        { type: 'CREDIT_CARD', value: CARD_4444 },
+      ],
+    },
+    // Aadhaar & PAN (both orders)
+    {
+      name: 'Aadhaar (4-4-4) + PAN',
+      input: `${AADHAAR_444} ${PAN}`,
+      expected: [
+        { type: 'AADHAAR', value: AADHAAR_444 },
+        { type: 'PAN', value: PAN },
+      ],
+    },
+    {
+      name: 'PAN + Aadhaar (4-4-4)',
+      input: `${PAN} ${AADHAAR_444}`,
+      expected: [
+        { type: 'PAN', value: PAN },
+        { type: 'AADHAAR', value: AADHAAR_444 },
+      ],
+    },
+  ];
+
+  for (const tc of adjacentPairs) {
+    it(`detects adjacent ${tc.name}`, () => {
+      const { matches } = detectPII(tc.input);
+      expect(matches.map((m) => ({ type: m.type, value: m.value }))).toEqual(tc.expected);
+    });
+  }
+
+  it('never lets a rejected Luhn span suppress a valid entity inside or adjacent to it', () => {
+    const input = '2341 2341 2346 4111 1111 1111 1111 | 4532-1234-5678-9010 9876543210';
+    const { matches, rejected } = detectPII(input);
+    expect(matches.map((m) => ({ type: m.type, value: m.value }))).toEqual([
+      { type: 'AADHAAR', value: '2341 2341 2346' },
+      { type: 'CREDIT_CARD', value: '4111 1111 1111 1111' },
+      { type: 'PHONE', value: '9876543210' },
+    ]);
+    expect(rejected.map((r) => r.value)).toEqual(['4532-1234-5678-9010']);
+  });
+});
