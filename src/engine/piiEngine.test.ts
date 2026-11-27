@@ -322,7 +322,7 @@ describe('Adjacent Entities & Non-Suppressing Rejected Spans', () => {
   }
 
   it('never lets a rejected Luhn span suppress a valid entity inside or adjacent to it', () => {
-    const input = '2341 2341 2346 4111 1111 1111 1111 | 4532-1234-5678-9010 mobile 9876543210';
+    const input = '2341 2341 2346 4111 1111 1111 1111 | 4532-1234-5678-9010 9876543210';
     const { matches, rejected } = detectPII(input);
     expect(matches.map((m) => ({ type: m.type, value: m.value }))).toEqual([
       { type: 'AADHAAR', value: '2341 2341 2346' },
@@ -334,20 +334,60 @@ describe('Adjacent Entities & Non-Suppressing Rejected Spans', () => {
 });
 
 describe('Phone Context Cues, Extended Formats & Zero-Width Mapping', () => {
-  it('ignores bare 10-digit IDs without cue words while flagging cued, CSV-header, and prefixed phones', () => {
-    const bareOrder = detectPII('order 8827364519');
+  it('always detects 9876543210 alone and next to other numbers while excluding dates and epochs', () => {
+    // Alone
+    const alone = sanitizeText('9876543210', { mode: 'full' });
+    expect(alone.counts.PHONE).toBe(1);
+    expect(alone.sanitizedText).toBe('[REDACTED]');
+
+    // Next to card, Aadhaar, and PAN without cue words
+    const nextToCard = sanitizeText('9876543210 4111 1111 1111 1111', { mode: 'full' });
+    expect(nextToCard.matches.map((m) => m.type)).toEqual(['PHONE', 'CREDIT_CARD']);
+    expect(nextToCard.sanitizedText).toBe('[REDACTED] [REDACTED]');
+
+    const nextToAadhaar = sanitizeText('2345 6789 0124 9876543210', { mode: 'full' });
+    expect(nextToAadhaar.matches.map((m) => m.type)).toEqual(['AADHAAR', 'PHONE']);
+    expect(nextToAadhaar.sanitizedText).toBe('[REDACTED] [REDACTED]');
+
+    const nextToPan = sanitizeText('9876543210 ABCDE1234F', { mode: 'full' });
+    expect(nextToPan.matches.map((m) => m.type)).toEqual(['PHONE', 'PAN']);
+
+    // Dates and epoch timestamps stay excluded
+    const nonPhones = detectPII('Date: 2026-11-27 | Epoch: 1732700000');
+    expect(nonPhones.matches).toHaveLength(0);
+  });
+
+  it('uses cue words to rank confidence by default and enforces cues when strictPhoneContext is enabled', () => {
+    const defaultCued = detectPII('call 9876543210 | ref 8827364519');
+    expect(defaultCued.matches).toHaveLength(2);
+    expect(defaultCued.matches[0].validation).toContain('high confidence');
+    expect(defaultCued.matches[1].validation).toContain('medium confidence');
+
+    const bareOrder = detectPII('order 8827364519', { strictPhoneContext: true });
     expect(bareOrder.matches).toHaveLength(0);
 
-    const cued = detectPII('Please call 8827364519 or tel 9876543210 or contact 7766554433');
-    expect(cued.matches.map((m) => m.value)).toEqual(['8827364519', '9876543210', '7766554433']);
+    const cuedStrict = detectPII('Please call 8827364519 or tel 9876543210 or contact 7766554433', {
+      strictPhoneContext: true,
+    });
+    expect(cuedStrict.matches.map((m) => m.value)).toEqual([
+      '8827364519',
+      '9876543210',
+      '7766554433',
+    ]);
 
-    const csvPhone = detectPII('id,customer_phone,order_id\n1,8827364519,9876543210');
+    const csvPhone = detectPII('id,customer_phone,order_id\n1,8827364519,9876543210', {
+      strictPhoneContext: true,
+    });
     expect(csvPhone.matches.map((m) => m.value)).toEqual(['8827364519']);
 
-    const csvMobile = detectPII('id,user_mobile,ref\n1,8827364519,9876543210');
+    const csvMobile = detectPII('id,user_mobile,ref\n1,8827364519,9876543210', {
+      strictPhoneContext: true,
+    });
     expect(csvMobile.matches.map((m) => m.value)).toEqual(['8827364519']);
 
-    const prefixed = detectPII('ref +918827364519 and alt 08827364519');
+    const prefixed = detectPII('ref +918827364519 and alt 08827364519', {
+      strictPhoneContext: true,
+    });
     expect(prefixed.matches.map((m) => m.value)).toEqual(['+918827364519', '08827364519']);
   });
 

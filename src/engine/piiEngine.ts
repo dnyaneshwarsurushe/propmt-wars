@@ -542,6 +542,7 @@ function isIsolatedFourGroupPrefix(text: string, start: number, end: number, sep
 export interface DetectOptions {
   enabledTypes?: Partial<EnabledEntityMap>;
   strictAadhaarVerhoeff?: boolean;
+  strictPhoneContext?: boolean;
   customPattern?: string;
   customMatches?: Array<{ start: number; end: number; value: string }>;
   customRegexErrorOverride?: string | null;
@@ -833,14 +834,19 @@ export function detectPII(
       });
     }
 
-    // 6c. Bare 10-digit numbers without +91 or 0 prefix: require context cue word or CSV phone/mobile column
+    // 6c. Bare 10-digit numbers [6-9]\d{9}: always detected by default (use cue words to rank confidence);
+    // when strictPhoneContext is enabled, require a context cue word or CSV phone/mobile header.
+    const strictPhone = Boolean(options.strictPhoneContext);
     findRegexMatches(cleanText, /(?<![\dA-Za-z+-])[6-9]\d{9}(?![\dA-Za-z-])/g, (m) => {
       const start = m.index;
       const end = start + m[0].length;
-      if (!hasBarePhoneContextCue(cleanText, start, end, getCsvHeader)) return;
+      const hasCue = hasBarePhoneContextCue(cleanText, start, end, getCsvHeader);
+      if (strictPhone && !hasCue) return;
       pushMappedCandidate(start, end, {
         type: 'PHONE',
-        validation: '10-digit mobile (context verified)',
+        validation: hasCue
+          ? '10-digit mobile (high confidence: context cue)'
+          : '10-digit mobile (medium confidence: [6-9] pattern)',
       });
     });
   }
@@ -1017,6 +1023,7 @@ export function sanitizeText(text: string, options: SanitizeOptions = {}): Sanit
   const { matches, rejected, ignoredCount, customRegexError } = detectPII(text, {
     enabledTypes: options.enabledTypes,
     strictAadhaarVerhoeff: options.strictAadhaarVerhoeff,
+    strictPhoneContext: options.strictPhoneContext,
     customPattern: options.customPattern,
     customMatches: options.customMatches,
     customRegexErrorOverride: options.customRegexErrorOverride,

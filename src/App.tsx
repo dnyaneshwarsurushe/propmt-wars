@@ -49,6 +49,7 @@ export function App() {
   const [mode, setMode] = useState<RedactionMode>('full');
   const [typedFullMask, setTypedFullMask] = useState(false);
   const [strictAadhaarVerhoeff, setStrictAadhaarVerhoeff] = useState(false);
+  const [strictPhoneContext, setStrictPhoneContext] = useState(false);
   const [customPattern, setCustomPattern] = useState('');
   const [customMatches, setCustomMatches] = useState<CustomMatchSpan[]>([]);
   const [customWorkerError, setCustomWorkerError] = useState<string | null>(null);
@@ -112,6 +113,7 @@ export function App() {
         enabledTypes,
         typedFullMask,
         strictAadhaarVerhoeff,
+        strictPhoneContext,
         customPattern,
         customMatches,
         customRegexErrorOverride: customWorkerError,
@@ -125,6 +127,7 @@ export function App() {
       enabledTypes,
       typedFullMask,
       strictAadhaarVerhoeff,
+      strictPhoneContext,
       customPattern,
       customMatches,
       customWorkerError,
@@ -406,6 +409,17 @@ export function App() {
             <div className="entity-strip-head">
               <span className="field-label">Entity Detectors &amp; Live Counts</span>
               <div className="policy-toggles">
+                <label
+                  className="toggle-chip"
+                  title="Require cue words (call, phone, mobile, tel, contact) or CSV phone/mobile headers for bare 10-digit numbers"
+                >
+                  <input
+                    type="checkbox"
+                    checked={strictPhoneContext}
+                    onChange={(e) => setStrictPhoneContext(e.target.checked)}
+                  />
+                  Strict phone context
+                </label>
                 <label
                   className="toggle-chip"
                   title="Require mathematical UIDAI Verhoeff checksum on 12-digit Aadhaar numbers"

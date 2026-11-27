@@ -108,6 +108,7 @@ export interface SanitizeOptions {
   fullMaskToken?: string;
   typedFullMask?: boolean;
   strictAadhaarVerhoeff?: boolean;
+  strictPhoneContext?: boolean;
   customPattern?: string;
   customMatches?: CustomMatchSpan[];
   customRegexErrorOverride?: string | null;

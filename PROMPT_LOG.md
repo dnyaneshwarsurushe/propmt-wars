@@ -76,3 +76,14 @@ This log records every chronological prompt iteration, what the model built or c
   - **Extended Formats & Zero-Width Mapping**: Added `.` separator support for cards, spaced Indian STD landlines (`011 2345 6789`), Unicode `\p{L}` email local/domain parts (`ñandú@correo.es`), and `stripZeroWidthWithMap` to strip invisible characters before matching while mapping `[start, end)` back to original text.
   - **Security Checks**: Added production CSP (`connect-src 'none'`, `object-src 'none'`) in `vite.config.ts`, 5 MB client upload guard in `src/App.tsx`, and CI checks (`npm audit --audit-level=high`, CSP & zero-external-URL checks, and secret scanning) in `.github/workflows/ci.yml`.
   - **Chronological Log & Tests**: Rewrote `PROMPT_LOG.md` chronologically and expanded `src/engine/piiEngine.test.ts` with tests for `(a+)+$` timeout, cue/CSV/prefixed phones, dotted cards, spaced landlines, accented emails, and zero-width offset mapping.
+
+---
+
+## Iteration 6 — Security Audit & Bare 10-Digit Phone Recall Restoration
+- **Exact Prompts**:
+  > `You are a security reviewer. Audit this repo (React 19 + TypeScript + Vite PII sanitizer, "propmt-wars"). It claims to be 100% client-side, with no data ever leaving the browser. Try to prove that claim wrong...`  
+  > `Fix prompt: "Revert the bare 10-digit phone rule in piiEngine.ts: always detect [6-9]\d{9} (with or without separators), still excluding dates and epoch timestamps. Use cue words only to rank confidence in the audit table, and add a 'Strict phone context' toggle that is off by default and restores the cue requirement. Add tests proving 9876543210 is redacted alone and next to other numbers."`
+- **What the Model Changed**:
+  - Completed a read-only 8-area security review (`SEC-01`–`SEC-11`) verifying network isolation while surfacing local leaks, $O(N^2)$ edge cases, and bare-phone recall trade-offs.
+  - Reverted bare `[6-9]\d{9}` phone detection in `src/engine/piiEngine.ts` to always detect by default (ranking cue-word matches as `high confidence` and bare patterns as `medium confidence` in the audit table) while still excluding dates and epoch timestamps.
+  - Added an opt-in **`Strict phone context`** toggle (OFF by default) in `src/App.tsx` and `strictPhoneContext` option in `src/engine/types.ts`, plus Vitest coverage proving `9876543210` is redacted both alone and adjacent to cards/Aadhaar/PAN.
