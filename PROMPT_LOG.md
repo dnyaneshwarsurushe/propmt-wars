@@ -98,3 +98,24 @@ This log records every chronological prompt iteration, what the model built or c
   - **Eliminated $O(N^2)$ DoS (`SEC-02`)**: Replaced per-offset backward/forward scanning with $O(N)$ `buildIsolatedFourGroupStarts` precomputation and replaced nested `matches.some(...)` with a two-pointer sweep over sorted spans.
   - **Canonical Pseudonyms (`SEC-08`)**: Canonicalized Indian 10-digit/0-prefixed/+91 phone numbers to `91` + 10 digits and expanded IPv6 addresses (`canonicalizeIPv6`) in `normalizeValue`.
   - **Upload, Paste, Filename & CI Hardening (`SEC-04`, `SEC-06`, `SEC-09`, `SEC-10`, `SEC-11`)**: Sanitized exported filenames (`getSafeFilenameBase`), enforced the 5 MB safety cap on textarea input, added `FileReader.onerror` + UTF-16 BOM decoding + null-byte binary rejection, reset `AuditTabs` search on Clear, and updated CI audit to `npm audit --omit=dev --audit-level=high`.
+
+---
+
+## Iteration 8 — CSV Formula Escaping & Stateful Multiline Quoted CSV Parser (`SEC-05`)
+- **Exact Prompts**:
+  > `yes` → `#1` → `check everything is okay or not`
+- **What the Model Changed**:
+  - Replaced line-split CSV parsing with stateful RFC-4180 `parseCsvRecords` in `src/engine/piiEngine.ts` so multiline quoted CSV cells preserve row integrity and attribute PII to the exact column in `CSV Column Risk` and `buildCsvHeaderLookup`.
+  - Added `escapeCsvFormulas` (`=`, `+`, `-`, `@`, `\t`, `\r` cell prefix neutralization) and wired an enabled-by-default **CSV formula guard** toggle into CSV copy and download in `src/App.tsx`.
+  - Added Vitest tests verifying multiline quoted CSV column attribution and idempotent CSV formula escaping.
+
+---
+
+## Iteration 9 — Code Quality Refactor & Accessibility Polish
+- **Exact Prompt**:
+  > `improve code quality` *(after receiving 96.34/100 evaluation: Security 100, Efficiency 100, Problem Alignment 100, Testing 98, Accessibility 96, Code Quality 86)*
+- **What the Model Changed**:
+  - Split monolithic `src/engine/piiEngine.ts` into focused single-responsibility modules: `src/engine/metadata.ts`, `src/engine/validators.ts`, `src/engine/csv.ts`, and `src/engine/detectors.ts` (preserving all public exports in `piiEngine.ts`).
+  - Extracted `src/utils/fileHelpers.ts`, `src/components/ControlsPanel.tsx`, and `src/components/FileInputPanel.tsx` from `src/App.tsx`.
+  - Added keyboard accessibility (`role="button"`, `tabIndex={0}`, `Enter`/`Space` handling, `:focus-visible` outlines) to interactive diff tokens in `src/components/DiffViewer.tsx` and `src/index.css`.
+  - Added `src/utils/fileHelpers.test.ts` testing BOM decoding, binary rejection, filename sanitization, and raw-PII-free audit JSON export.

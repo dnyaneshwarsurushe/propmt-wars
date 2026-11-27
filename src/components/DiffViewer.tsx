@@ -121,9 +121,18 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
       nodes.push(
         <span
           key={m.id}
+          role="button"
+          tabIndex={0}
+          aria-pressed={isSelected}
           className={tokenClass}
-          title={`${meta.label} (${m.validation})\nClick to inspect or whitelist`}
+          title={`${meta.label} (${m.validation})\nClick or press Enter to inspect or whitelist`}
           onClick={() => onSelectEntity(isSelected ? null : m.id)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onSelectEntity(isSelected ? null : m.id);
+            }
+          }}
         >
           {side === 'original' ? m.value : m.replacement}
         </span>

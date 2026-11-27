@@ -1,29 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlertTriangle,
-  CheckCircle2,
-  FileText,
-  Moon,
-  Plus,
-  RotateCcw,
-  Shield,
-  Sparkles,
-  Sun,
-  Trash2,
-  Upload,
-} from 'lucide-react';
+import { CheckCircle2, Moon, Shield, Sparkles, Sun, Trash2, Upload } from 'lucide-react';
 import { AuditTabs } from './components/AuditTabs';
+import { ControlsPanel } from './components/ControlsPanel';
 import { DiffViewer } from './components/DiffViewer';
+import { FileInputPanel } from './components/FileInputPanel';
 import { DEFAULT_SAMPLE_ID, SAMPLES, type SampleDataset } from './data/samples';
-import {
-  CUSTOM_REGEX_TIMEOUT_MS,
-  runCustomRegexInWorker,
-} from './engine/customRegexRunner';
+import { CUSTOM_REGEX_TIMEOUT_MS, runCustomRegexInWorker } from './engine/customRegexRunner';
 import {
   DEFAULT_ENABLED_TYPES,
-  ENTITY_META,
-  ENTITY_ORDER,
-  applyPartialMask,
+  escapeCsvFormulas,
   sanitizeText,
   stripZeroWidthWithMap,
 } from './engine/piiEngine';
@@ -33,14 +18,13 @@ import type {
   EntityType,
   RedactionMode,
 } from './engine/types';
-
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5 MB client-side safety guard
-
-const MODE_OPTIONS: Array<{ id: RedactionMode; title: string; preview: string }> = [
-  { id: 'full', title: 'Full Mask', preview: '[REDACTED]' },
-  { id: 'partial', title: 'Partial Mask', preview: 'XXXX-XXXX-XXXX-9014' },
-  { id: 'pseudonym', title: 'Consistent Pseudonym', preview: 'USER_01' },
-];
+import {
+  MAX_UPLOAD_BYTES,
+  buildAuditReportJson,
+  decodeTextFileBuffer,
+  getSafeFilenameBase,
+  triggerFileDownload,
+} from './utils/fileHelpers';
 
 export function App() {
   const [rawText, setRawText] = useState('');
@@ -50,15 +34,13 @@ export function App() {
   const [typedFullMask, setTypedFullMask] = useState(false);
   const [strictAadhaarVerhoeff, setStrictAadhaarVerhoeff] = useState(false);
   const [strictPhoneContext, setStrictPhoneContext] = useState(false);
+  const [escapeCsvFormulaCells, setEscapeCsvFormulaCells] = useState(true);
   const [customPattern, setCustomPattern] = useState('');
   const [customMatches, setCustomMatches] = useState<CustomMatchSpan[]>([]);
   const [customWorkerError, setCustomWorkerError] = useState<string | null>(null);
-  const [showCustomRule, setShowCustomRule] = useState(false);
   const [ignoredValues, setIgnoredValues] = useState<string[]>([]);
   const [enabledTypes, setEnabledTypes] = useState<EnabledEntityMap>(DEFAULT_ENABLED_TYPES);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
-  const [editorCollapsed, setEditorCollapsed] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [clearSignal, setClearSignal] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
@@ -90,15 +72,11 @@ export function App() {
     const { cleanText, mapSpan } = stripZeroWidthWithMap(rawText);
     void runCustomRegexInWorker(cleanText, trimmed, CUSTOM_REGEX_TIMEOUT_MS).then((res) => {
       if (cancelled) return;
-      const mappedMatches = res.matches.map((m) => {
+      const mapped = res.matches.map((m) => {
         const { start, end } = mapSpan(m.start, m.end);
-        return {
-          start,
-          end,
-          value: rawText.slice(start, end),
-        };
+        return { start, end, value: rawText.slice(start, end) };
       });
-      setCustomMatches(mappedMatches);
+      setCustomMatches(mapped);
       setCustomWorkerError(res.customRegexError);
     });
 
@@ -164,42 +142,21 @@ export function App() {
       notify('Please upload a .txt or .csv file.');
       return;
     }
+
     const reader = new FileReader();
-    reader.onerror = () => {
-      notify('Failed to read file locally. Check file permissions or encoding.');
-    };
+    reader.onerror = () => notify('Failed to read file locally. Check file permissions or encoding.');
     reader.onload = (ev) => {
       const buffer = ev.target?.result;
       if (!(buffer instanceof ArrayBuffer)) {
         notify('Unsupported file read result.');
         return;
       }
-      const bytes = new Uint8Array(buffer);
-      let encoding: 'utf-8' | 'utf-16le' | 'utf-16be' = 'utf-8';
-      let offset = 0;
-
-      if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
-        encoding = 'utf-16le';
-        offset = 2;
-      } else if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
-        encoding = 'utf-16be';
-        offset = 2;
-      } else {
-        if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-          offset = 3;
-        }
-        // Reject binary files disguised as .txt/.csv (null byte check)
-        const probeLimit = Math.min(bytes.length, 8192);
-        for (let i = offset; i < probeLimit; i++) {
-          if (bytes[i] === 0) {
-            notify('Binary file detected. Please upload plain UTF-8/UTF-16 .txt or .csv text.');
-            return;
-          }
-        }
+      const decoded = decodeTextFileBuffer(buffer);
+      if (decoded.error || decoded.text === undefined) {
+        notify(decoded.error ?? 'Failed to decode file.');
+        return;
       }
-
-      const decoded = new TextDecoder(encoding).decode(bytes.subarray(offset));
-      setRawText(decoded);
+      setRawText(decoded.text);
       setFilename(file.name);
       setSelectedId(null);
       notify(`Loaded ${file.name} locally in browser memory`);
@@ -207,59 +164,52 @@ export function App() {
     reader.readAsArrayBuffer(file);
   };
 
-  const toggleEntity = (type: EntityType) => {
-    setEnabledTypes((prev) => ({ ...prev, [type]: !prev[type] }));
+  const handleRawTextChange = (next: string) => {
+    if (next.length > MAX_UPLOAD_BYTES) {
+      setRawText(next.slice(0, MAX_UPLOAD_BYTES));
+      notify('Input truncated at 5 MB client-side safety limit.');
+    } else {
+      setRawText(next);
+    }
     setSelectedId(null);
+  };
+
+  const handleClear = () => {
+    setRawText('');
+    setFilename('pasted_text.txt');
+    setSelectedId(null);
+    setCustomMatches([]);
+    setCustomWorkerError(null);
+    setClearSignal((c) => c + 1);
   };
 
   const handleIgnoreValue = (value: string) => {
     const trimmed = value.trim();
     if (!trimmed) return;
-    setIgnoredValues((prev) => {
-      if (prev.some((v) => v.toLowerCase() === trimmed.toLowerCase())) return prev;
-      return [...prev, trimmed];
-    });
+    setIgnoredValues((prev) =>
+      prev.some((v) => v.toLowerCase() === trimmed.toLowerCase()) ? prev : [...prev, trimmed]
+    );
     setSelectedId(null);
     notify('Added value to local allowlist');
   };
 
+  const getExportText = () =>
+    isCsv && escapeCsvFormulaCells ? escapeCsvFormulas(result.sanitizedText) : result.sanitizedText;
+
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(result.sanitizedText);
+      await navigator.clipboard.writeText(getExportText());
       notify('Sanitized output copied to clipboard');
     } catch {
       notify('Clipboard blocked; use Download Sanitized File instead.');
     }
   };
 
-  const triggerDownload = (content: string, outName: string, mime: string) => {
-    const blob = new Blob([content], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = outName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const getSafeFilenameBase = (rawName: string): string => {
-    const dot = rawName.lastIndexOf('.');
-    const rawBase = dot > 0 ? rawName.slice(0, dot) : rawName;
-    const cleaned = sanitizeText(rawBase, {
-      mode: 'full',
-      fullMaskToken: 'redacted',
-      strictPhoneContext: false,
-    }).sanitizedText;
-    return cleaned.replace(/[^A-Za-z0-9._-]+/g, '_') || 'sanitized_output';
-  };
-
   const handleDownloadSanitized = () => {
     const safeBase = getSafeFilenameBase(filename);
     const outName = `${safeBase}_sanitized${isCsv ? '.csv' : '.txt'}`;
-    triggerDownload(
-      result.sanitizedText,
+    triggerFileDownload(
+      getExportText(),
       outName,
       isCsv ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8'
     );
@@ -267,40 +217,19 @@ export function App() {
   };
 
   const handleDownloadAuditJson = () => {
-    const safeSourceName = `${getSafeFilenameBase(filename)}${isCsv ? '.csv' : '.txt'}`;
-    const report = {
-      generatedAt: new Date().toISOString(),
-      sourceFilename: safeSourceName,
-      mode,
-      riskSummary: result.risk,
-      counts: result.counts,
-      csvColumns: result.csvColumns,
-      entities: result.matches.map((m) => ({
-        line: m.line,
-        column: m.column,
-        type: m.type,
-        safePreview: applyPartialMask(m.type, m.value),
-        replacement: m.replacement,
-        validation: m.validation,
-      })),
-      rejectedCandidates: result.rejected.map((r) => ({
-        line: r.line,
-        column: r.column,
-        type: r.type,
-        safePreview: applyPartialMask(r.type, r.value),
-        reason: r.reason,
-      })),
-    };
-    triggerDownload(JSON.stringify(report, null, 2), 'pii_audit_report.json', 'application/json');
+    const json = buildAuditReportJson(filename, isCsv, mode, result);
+    triggerFileDownload(json, 'pii_audit_report.json', 'application/json');
     notify('Downloaded privacy-safe audit report (JSON)');
   };
 
-  const lineCount = rawText ? rawText.split('\n').length : 0;
+  const toggleEntity = (type: EntityType) => {
+    setEnabledTypes((prev) => ({ ...prev, [type]: !prev[type] }));
+    setSelectedId(null);
+  };
 
   return (
     <div className={`app-root theme-${theme}`}>
       <div className="container">
-        {/* Header */}
         <header className="topbar">
           <div className="brand">
             <div className="brand-icon" aria-hidden="true">
@@ -369,14 +298,7 @@ export function App() {
             <button
               type="button"
               className="btn btn-ghost"
-              onClick={() => {
-                setRawText('');
-                setFilename('pasted_text.txt');
-                setSelectedId(null);
-                setCustomMatches([]);
-                setCustomWorkerError(null);
-                setClearSignal((c) => c + 1);
-              }}
+              onClick={handleClear}
               disabled={!rawText}
             >
               <Trash2 size={14} />
@@ -395,250 +317,38 @@ export function App() {
           </div>
         </header>
 
-        {/* Controls & Summary */}
-        <section className="card controls-card">
-          <div className="controls-top">
-            <div>
-              <span className="field-label">Redaction Mode</span>
-              <div className="mode-row">
-                <div className="mode-grid" role="radiogroup" aria-label="Redaction mode">
-                  {MODE_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      role="radio"
-                      aria-checked={mode === opt.id}
-                      className={`mode-btn${mode === opt.id ? ' active' : ''}`}
-                      onClick={() => setMode(opt.id)}
-                    >
-                      <strong>{opt.title}</strong>
-                      <code>
-                        {opt.id === 'full' && typedFullMask ? '[REDACTED:TYPE]' : opt.preview}
-                      </code>
-                    </button>
-                  ))}
-                </div>
+        <ControlsPanel
+          mode={mode}
+          onModeChange={setMode}
+          typedFullMask={typedFullMask}
+          onTypedFullMaskChange={setTypedFullMask}
+          isCsv={isCsv}
+          escapeCsvFormulaCells={escapeCsvFormulaCells}
+          onEscapeCsvFormulaCellsChange={setEscapeCsvFormulaCells}
+          strictPhoneContext={strictPhoneContext}
+          onStrictPhoneContextChange={setStrictPhoneContext}
+          strictAadhaarVerhoeff={strictAadhaarVerhoeff}
+          onStrictAadhaarVerhoeffChange={setStrictAadhaarVerhoeff}
+          customPattern={customPattern}
+          onCustomPatternChange={setCustomPattern}
+          enabledTypes={enabledTypes}
+          onToggleEntity={toggleEntity}
+          ignoredValues={ignoredValues}
+          onRemoveIgnoredValue={(val) =>
+            setIgnoredValues((prev) => prev.filter((item) => item !== val))
+          }
+          onResetAllowlist={() => setIgnoredValues([])}
+          result={result}
+        />
 
-                {mode === 'full' && (
-                  <label className="toggle-chip" title="Include entity category in full mask blocks">
-                    <input
-                      type="checkbox"
-                      checked={typedFullMask}
-                      onChange={(e) => setTypedFullMask(e.target.checked)}
-                    />
-                    Include entity tag
-                  </label>
-                )}
-              </div>
-            </div>
+        <FileInputPanel
+          rawText={rawText}
+          filename={filename}
+          csvSummary={csvSummary}
+          onTextChange={handleRawTextChange}
+          onFileDrop={handleFile}
+        />
 
-            <div className="kpi-strip">
-              <div className={`kpi-box kpi-risk-${result.risk.level.toLowerCase()}`}>
-                <span>Exposure Risk</span>
-                <strong>
-                  {result.risk.level} ({result.risk.score}/100)
-                </strong>
-              </div>
-              <div className="kpi-box">
-                <span>PII Entities</span>
-                <strong>{result.counts.TOTAL}</strong>
-              </div>
-              <div
-                className="kpi-box kpi-safe"
-                title="13–19 digit strings that failed Luhn mod-10 checksum and were kept untouched"
-              >
-                <span>Luhn Guard Blocked</span>
-                <strong>{result.counts.REJECTED_LUHN}</strong>
-              </div>
-            </div>
-          </div>
-
-          <div className="entity-strip">
-            <div className="entity-strip-head">
-              <span className="field-label">Entity Detectors &amp; Live Counts</span>
-              <div className="policy-toggles">
-                <label
-                  className="toggle-chip"
-                  title="Require cue words (call, phone, mobile, tel, contact) or CSV phone/mobile headers for bare 10-digit numbers"
-                >
-                  <input
-                    type="checkbox"
-                    checked={strictPhoneContext}
-                    onChange={(e) => setStrictPhoneContext(e.target.checked)}
-                  />
-                  Strict phone context
-                </label>
-                <label
-                  className="toggle-chip"
-                  title="Require mathematical UIDAI Verhoeff checksum on 12-digit Aadhaar numbers"
-                >
-                  <input
-                    type="checkbox"
-                    checked={strictAadhaarVerhoeff}
-                    onChange={(e) => setStrictAadhaarVerhoeff(e.target.checked)}
-                  />
-                  Strict Aadhaar Verhoeff
-                </label>
-                <button
-                  type="button"
-                  className="btn btn-xs btn-secondary"
-                  onClick={() => setShowCustomRule((s) => !s)}
-                >
-                  <Plus size={12} />
-                  {customPattern ? 'Custom Regex Active' : 'Custom Regex Rule'}
-                </button>
-              </div>
-            </div>
-
-            <div className="entity-chips">
-              {ENTITY_ORDER.filter((type) => type !== 'CUSTOM' || customPattern.trim().length > 0).map(
-                (type) => {
-                  const meta = ENTITY_META[type];
-                  const enabled = enabledTypes[type];
-                  return (
-                    <button
-                      key={type}
-                      type="button"
-                      aria-pressed={enabled}
-                      className={`entity-chip${enabled ? '' : ' off'}`}
-                      onClick={() => toggleEntity(type)}
-                    >
-                      <span className={`dot dot-${type.toLowerCase()}`} />
-                      <span>{meta.shortLabel}</span>
-                      <span className="chip-count">{result.counts[type]}</span>
-                    </button>
-                  );
-                }
-              )}
-            </div>
-
-            {showCustomRule && (
-              <div className="custom-rule-bar">
-                <label htmlFor="customRegexInput" className="muted-text">
-                  Custom Regex:
-                </label>
-                <input
-                  id="customRegexInput"
-                  type="text"
-                  className="custom-regex-input mono"
-                  value={customPattern}
-                  onChange={(e) => setCustomPattern(e.target.value)}
-                  placeholder="e.g. EMP-\d{4}|#INC-\d+|sk-[A-Za-z0-9]{16}"
-                />
-                {customPattern && (
-                  <button
-                    type="button"
-                    className="btn btn-xs btn-ghost"
-                    onClick={() => setCustomPattern('')}
-                  >
-                    Clear Rule
-                  </button>
-                )}
-                {result.customRegexError && (
-                  <span className="regex-error">
-                    <AlertTriangle size={12} /> {result.customRegexError}
-                  </span>
-                )}
-              </div>
-            )}
-
-            {ignoredValues.length > 0 && (
-              <div className="allowlist-bar">
-                <span className="muted-text">Allowlisted ({ignoredValues.length}):</span>
-                {ignoredValues.map((val) => (
-                  <button
-                    key={val}
-                    type="button"
-                    className="allowlist-pill mono"
-                    onClick={() =>
-                      setIgnoredValues((prev) => prev.filter((item) => item !== val))
-                    }
-                    title="Click to remove from allowlist and resume redacting"
-                  >
-                    {val} ×
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  className="btn btn-xs btn-ghost"
-                  onClick={() => setIgnoredValues([])}
-                >
-                  <RotateCcw size={11} />
-                  Reset Allowlist
-                </button>
-              </div>
-            )}
-          </div>
-        </section>
-
-        {/* Raw Input Area */}
-        <section
-          className={`card editor-card${isDragging ? ' dragging' : ''}${
-            editorCollapsed ? ' collapsed' : ''
-          }`}
-          onDragEnter={(e) => {
-            e.preventDefault();
-            setIsDragging(true);
-          }}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setIsDragging(true);
-          }}
-          onDragLeave={(e) => {
-            e.preventDefault();
-            setIsDragging(false);
-          }}
-          onDrop={(e) => {
-            e.preventDefault();
-            setIsDragging(false);
-            handleFile(e.dataTransfer.files?.[0]);
-          }}
-        >
-          <div className="editor-head">
-            <div className="editor-meta">
-              <FileText size={15} />
-              <strong>Raw Input</strong>
-              <span className="pill-metric">{filename}</span>
-              {csvSummary && <span className="pill-metric">{csvSummary}</span>}
-              <span className="muted-text">
-                {lineCount} {lineCount === 1 ? 'line' : 'lines'} · {rawText.length} chars
-              </span>
-            </div>
-            <div className="editor-actions">
-              <span className="muted-text">
-                Paste text or drag &amp; drop a <code>.txt</code> / <code>.csv</code> file
-              </span>
-              <button
-                type="button"
-                className="btn btn-xs btn-ghost"
-                onClick={() => setEditorCollapsed((c) => !c)}
-              >
-                {editorCollapsed ? 'Expand Editor' : 'Collapse Editor'}
-              </button>
-            </div>
-          </div>
-
-          {!editorCollapsed && (
-            <textarea
-              className="raw-input"
-              spellCheck={false}
-              value={rawText}
-              onChange={(e) => {
-                const next = e.target.value;
-                if (next.length > MAX_UPLOAD_BYTES) {
-                  setRawText(next.slice(0, MAX_UPLOAD_BYTES));
-                  notify('Input truncated at 5 MB client-side safety limit.');
-                } else {
-                  setRawText(next);
-                }
-                setSelectedId(null);
-              }}
-              placeholder="Paste logs, resumes, support tickets, clinical notes, or CSV data here — or click 'Load Sample Text'..."
-            />
-          )}
-        </section>
-
-        {/* Side-by-Side Diff */}
         <DiffViewer
           text={rawText}
           result={result}
@@ -651,7 +361,6 @@ export function App() {
           onDownload={handleDownloadSanitized}
         />
 
-        {/* Audit, Pseudonym Map, Checksum Guard, CSV Risk & Prompt Log */}
         <AuditTabs
           result={result}
           selectedId={selectedId}

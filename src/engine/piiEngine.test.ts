@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { SAMPLES } from '../data/samples';
 import { CUSTOM_REGEX_TIMEOUT_ERROR, runCustomRegexInWorker } from './customRegexRunner';
-import { detectPII, isValidIPv6, isValidLuhn, isValidVerhoeff, sanitizeText } from './piiEngine';
+import {
+  detectPII,
+  escapeCsvFormulas,
+  isValidIPv6,
+  isValidLuhn,
+  isValidVerhoeff,
+  parseCsvRecords,
+  sanitizeText,
+} from './piiEngine';
 
 describe('Luhn & Verhoeff Checksum Validation', () => {
   it('accepts valid Visa, Mastercard, Amex, and Discover numbers', () => {
@@ -441,5 +449,20 @@ describe('Security Hardening: Linear Scaling & Canonical Pseudonyms', () => {
     const repeated = '4111 '.repeat(10000);
     const res = sanitizeText(repeated, { mode: 'full' });
     expect(res.durationMs).toBeLessThan(500);
+  });
+
+  it('escapes CSV formula prefixes and parses multiline quoted CSV cells accurately', () => {
+    const csv = 'id,email,notes\n1,alice@acme.com,"line 1\nbob@acme.com"\n2,user@x.com,"=CMD()"\n3,c@d.org,+1234';
+    const records = parseCsvRecords(csv);
+    expect(records).toHaveLength(4); // header + 3 rows (multiline quoted cell stays 1 row)
+
+    const res = sanitizeText(csv, { mode: 'full', isCsv: true });
+    expect(res.csvColumns.find((c) => c.header === 'email')?.entityCount).toBe(3);
+    expect(res.csvColumns.find((c) => c.header === 'notes')?.entityCount).toBe(1);
+
+    const safeCsv = escapeCsvFormulas(res.sanitizedText);
+    expect(safeCsv).toContain(`"'=CMD()"`);
+    expect(safeCsv).toContain(`'+1234`);
+    expect(escapeCsvFormulas(safeCsv)).toBe(safeCsv); // idempotent
   });
 });

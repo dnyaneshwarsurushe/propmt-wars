@@ -572,6 +572,16 @@ code, .mono {
   outline: none;
 }
 
+.token:focus-visible,
+.btn:focus-visible,
+.mode-btn:focus-visible,
+.entity-chip:focus-visible,
+.tab-btn:focus-visible,
+.quickstart-card:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 /* Diff */
 .diff-card {
   overflow: hidden;
