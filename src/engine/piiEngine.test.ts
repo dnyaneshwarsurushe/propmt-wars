@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SAMPLES } from '../data/samples';
+import { CUSTOM_REGEX_TIMEOUT_ERROR, runCustomRegexInWorker } from './customRegexRunner';
 import { detectPII, isValidIPv6, isValidLuhn, isValidVerhoeff, sanitizeText } from './piiEngine';
 
 describe('Luhn & Verhoeff Checksum Validation', () => {
@@ -156,7 +157,7 @@ describe('Sample Datasets, Risk Scoring & CSV Column Profiling', () => {
 });
 
 describe('Adjacent Entities & Non-Suppressing Rejected Spans', () => {
-  const PHONE_1 = '9876543210';
+  const PHONE_PREFIXED = '09876543210';
   const PHONE_E164 = '+91 98765 43210';
   const CARD_4444 = '4111 1111 1111 1111';
   const CARD_AMEX = '3782 822463 10005';
@@ -171,10 +172,18 @@ describe('Adjacent Entities & Non-Suppressing Rejected Spans', () => {
   }> = [
     // Phone & Card (both orders)
     {
-      name: 'phone + card (4-4-4-4)',
-      input: `${PHONE_1} ${CARD_4444}`,
+      name: 'cued bare phone + card (4-4-4-4)',
+      input: `call 9876543210 ${CARD_4444}`,
       expected: [
-        { type: 'PHONE', value: PHONE_1 },
+        { type: 'PHONE', value: '9876543210' },
+        { type: 'CREDIT_CARD', value: CARD_4444 },
+      ],
+    },
+    {
+      name: '0-prefixed phone + card (4-4-4-4)',
+      input: `${PHONE_PREFIXED} ${CARD_4444}`,
+      expected: [
+        { type: 'PHONE', value: PHONE_PREFIXED },
         { type: 'CREDIT_CARD', value: CARD_4444 },
       ],
     },
@@ -187,11 +196,11 @@ describe('Adjacent Entities & Non-Suppressing Rejected Spans', () => {
       ],
     },
     {
-      name: 'card (4-4-4-4) + phone',
-      input: `${CARD_4444} ${PHONE_1}`,
+      name: 'card (4-4-4-4) + prefixed phone',
+      input: `${CARD_4444} ${PHONE_PREFIXED}`,
       expected: [
         { type: 'CREDIT_CARD', value: CARD_4444 },
-        { type: 'PHONE', value: PHONE_1 },
+        { type: 'PHONE', value: PHONE_PREFIXED },
       ],
     },
     {
@@ -204,10 +213,10 @@ describe('Adjacent Entities & Non-Suppressing Rejected Spans', () => {
     },
     // Phone & Aadhaar (both orders)
     {
-      name: 'phone + Aadhaar (4-4-4)',
-      input: `${PHONE_1} ${AADHAAR_444}`,
+      name: 'prefixed phone + Aadhaar (4-4-4)',
+      input: `${PHONE_PREFIXED} ${AADHAAR_444}`,
       expected: [
-        { type: 'PHONE', value: PHONE_1 },
+        { type: 'PHONE', value: PHONE_PREFIXED },
         { type: 'AADHAAR', value: AADHAAR_444 },
       ],
     },
@@ -220,11 +229,11 @@ describe('Adjacent Entities & Non-Suppressing Rejected Spans', () => {
       ],
     },
     {
-      name: 'Aadhaar (4-4-4) + phone',
-      input: `${AADHAAR_444} ${PHONE_1}`,
+      name: 'Aadhaar (4-4-4) + prefixed phone',
+      input: `${AADHAAR_444} ${PHONE_PREFIXED}`,
       expected: [
         { type: 'AADHAAR', value: AADHAAR_444 },
-        { type: 'PHONE', value: PHONE_1 },
+        { type: 'PHONE', value: PHONE_PREFIXED },
       ],
     },
     {
@@ -237,19 +246,19 @@ describe('Adjacent Entities & Non-Suppressing Rejected Spans', () => {
     },
     // Phone & PAN (both orders)
     {
-      name: 'phone + PAN',
-      input: `${PHONE_1} ${PAN}`,
+      name: 'prefixed phone + PAN',
+      input: `${PHONE_PREFIXED} ${PAN}`,
       expected: [
-        { type: 'PHONE', value: PHONE_1 },
+        { type: 'PHONE', value: PHONE_PREFIXED },
         { type: 'PAN', value: PAN },
       ],
     },
     {
-      name: 'PAN + phone',
-      input: `${PAN} ${PHONE_1}`,
+      name: 'PAN + prefixed phone',
+      input: `${PAN} ${PHONE_PREFIXED}`,
       expected: [
         { type: 'PAN', value: PAN },
-        { type: 'PHONE', value: PHONE_1 },
+        { type: 'PHONE', value: PHONE_PREFIXED },
       ],
     },
     // Card & Aadhaar (both orders)
@@ -313,7 +322,7 @@ describe('Adjacent Entities & Non-Suppressing Rejected Spans', () => {
   }
 
   it('never lets a rejected Luhn span suppress a valid entity inside or adjacent to it', () => {
-    const input = '2341 2341 2346 4111 1111 1111 1111 | 4532-1234-5678-9010 9876543210';
+    const input = '2341 2341 2346 4111 1111 1111 1111 | 4532-1234-5678-9010 mobile 9876543210';
     const { matches, rejected } = detectPII(input);
     expect(matches.map((m) => ({ type: m.type, value: m.value }))).toEqual([
       { type: 'AADHAAR', value: '2341 2341 2346' },
@@ -321,5 +330,56 @@ describe('Adjacent Entities & Non-Suppressing Rejected Spans', () => {
       { type: 'PHONE', value: '9876543210' },
     ]);
     expect(rejected.map((r) => r.value)).toEqual(['4532-1234-5678-9010']);
+  });
+});
+
+describe('Phone Context Cues, Extended Formats & Zero-Width Mapping', () => {
+  it('ignores bare 10-digit IDs without cue words while flagging cued, CSV-header, and prefixed phones', () => {
+    const bareOrder = detectPII('order 8827364519');
+    expect(bareOrder.matches).toHaveLength(0);
+
+    const cued = detectPII('Please call 8827364519 or tel 9876543210 or contact 7766554433');
+    expect(cued.matches.map((m) => m.value)).toEqual(['8827364519', '9876543210', '7766554433']);
+
+    const csvPhone = detectPII('id,customer_phone,order_id\n1,8827364519,9876543210');
+    expect(csvPhone.matches.map((m) => m.value)).toEqual(['8827364519']);
+
+    const csvMobile = detectPII('id,user_mobile,ref\n1,8827364519,9876543210');
+    expect(csvMobile.matches.map((m) => m.value)).toEqual(['8827364519']);
+
+    const prefixed = detectPII('ref +918827364519 and alt 08827364519');
+    expect(prefixed.matches.map((m) => m.value)).toEqual(['+918827364519', '08827364519']);
+  });
+
+  it('detects dotted cards, spaced Indian landlines, and accented Unicode emails', () => {
+    const input =
+      'Card 4111.1111.1111.1111 | Landline 011 2345 6789 and 0124 456789 | Email ñandú@correo.es';
+    const res = sanitizeText(input, { mode: 'partial' });
+    expect(res.counts.CREDIT_CARD).toBe(1);
+    expect(res.counts.PHONE).toBe(2);
+    expect(res.counts.EMAIL).toBe(1);
+    expect(res.sanitizedText).toContain('XXXX.XXXX.XXXX.1111');
+    expect(res.sanitizedText).toContain('XXX XXXX 6789');
+    expect(res.sanitizedText).toContain('ñ***@correo.es');
+  });
+
+  it('strips zero-width characters before matching and maps offsets back to original text', () => {
+    const input = 'Reach \u200Bñan\u200Bdú@correo.es or card 4111.\u200C1111.1111.1111 end.';
+    const res = sanitizeText(input, { mode: 'full' });
+    expect(res.counts.EMAIL).toBe(1);
+    expect(res.counts.CREDIT_CARD).toBe(1);
+    expect(res.sanitizedText).toBe('Reach \u200B[REDACTED] or card [REDACTED] end.');
+    expect(res.matches[0].start).toBe(7); // skips leading zero-width char before 'ñ'
+    expect(input.slice(res.matches[0].start, res.matches[0].end)).toBe('ñan\u200Bdú@correo.es');
+  });
+});
+
+describe('Custom Regex Worker Timeout (ReDoS Protection)', () => {
+  it('terminates catastrophic backtracking (a+)+$ within 500 ms and sets customRegexError', async () => {
+    const evilInput = `${'a'.repeat(30)}!`;
+    const result = await runCustomRegexInWorker(evilInput, '(a+)+$', 500);
+    expect(result.timedOut).toBe(true);
+    expect(result.matches).toEqual([]);
+    expect(result.customRegexError).toBe(CUSTOM_REGEX_TIMEOUT_ERROR);
   });
 });

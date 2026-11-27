@@ -96,6 +96,12 @@ export interface SanitizationResult {
   durationMs: number;
 }
 
+export interface CustomMatchSpan {
+  start: number;
+  end: number;
+  value: string;
+}
+
 export interface SanitizeOptions {
   mode?: RedactionMode;
   enabledTypes?: Partial<EnabledEntityMap>;
@@ -103,6 +109,9 @@ export interface SanitizeOptions {
   typedFullMask?: boolean;
   strictAadhaarVerhoeff?: boolean;
   customPattern?: string;
+  customMatches?: CustomMatchSpan[];
+  customRegexErrorOverride?: string | null;
+  skipSyncCustomRegex?: boolean;
   ignoredValues?: string[];
   isCsv?: boolean;
 }

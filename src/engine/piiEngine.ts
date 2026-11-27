@@ -196,9 +196,51 @@ export function isValidIPv6(candidate: string): boolean {
 function isCardLikeShape(rawValue: string): boolean {
   const trimmed = rawValue.trim();
   if (/^\d{13,19}$/.test(trimmed)) return true;
-  if (/^\d{4}([ -])\d{4}\1\d{4}\1\d{1,7}$/.test(trimmed)) return true;
-  if (/^\d{4}([ -])\d{6}\1\d{4,5}$/.test(trimmed)) return true;
+  if (/^\d{4}([ .-])\d{4}\1\d{4}\1\d{1,7}$/.test(trimmed)) return true;
+  if (/^\d{4}([ .-])\d{6}\1\d{4,5}$/.test(trimmed)) return true;
   return false;
+}
+
+export const ZERO_WIDTH_REGEX = /[\u200B-\u200D\u2060\uFEFF]/g;
+const ZERO_WIDTH_CHAR_REGEX = /[\u200B-\u200D\u2060\uFEFF]/;
+
+/**
+ * Strips invisible zero-width characters before regex matching while preserving
+ * an exact index map back to the original text offsets.
+ */
+export function stripZeroWidthWithMap(text: string): {
+  cleanText: string;
+  mapSpan: (cleanStart: number, cleanEnd: number) => { start: number; end: number };
+} {
+  if (!ZERO_WIDTH_CHAR_REGEX.test(text)) {
+    return {
+      cleanText: text,
+      mapSpan: (cleanStart, cleanEnd) => ({ start: cleanStart, end: cleanEnd }),
+    };
+  }
+
+  const cleanChars: string[] = [];
+  const cleanToOrig: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (!ZERO_WIDTH_CHAR_REGEX.test(ch)) {
+      cleanChars.push(ch);
+      cleanToOrig.push(i);
+    }
+  }
+
+  return {
+    cleanText: cleanChars.join(''),
+    mapSpan: (cleanStart, cleanEnd) => {
+      if (cleanEnd <= cleanStart || cleanToOrig.length === 0) {
+        const idx = cleanToOrig[cleanStart] ?? text.length;
+        return { start: idx, end: idx };
+      }
+      const start = cleanToOrig[cleanStart] ?? 0;
+      const end = (cleanToOrig[cleanEnd - 1] ?? text.length - 1) + 1;
+      return { start, end };
+    },
+  };
 }
 
 function findRegexMatches(
@@ -243,52 +285,54 @@ function buildLineLocator(text: string): (index: number) => { line: number; colu
 }
 
 export function normalizeValue(type: EntityType, value: string): string {
+  const clean = value.replace(ZERO_WIDTH_REGEX, '');
   switch (type) {
     case 'EMAIL':
     case 'IP_ADDRESS':
-      return value.trim().toLowerCase();
+      return clean.trim().toLowerCase();
     case 'PAN':
-      return value.trim().toUpperCase();
+      return clean.trim().toUpperCase();
     case 'AADHAAR':
     case 'CREDIT_CARD':
     case 'PHONE':
-      return value.replace(/\D/g, '');
+      return clean.replace(/\D/g, '');
     case 'CUSTOM':
-      return value.trim();
+      return clean.trim();
   }
 }
 
 export function applyPartialMask(type: EntityType, value: string): string {
+  const clean = value.replace(ZERO_WIDTH_REGEX, '');
   switch (type) {
     case 'CREDIT_CARD':
     case 'AADHAAR': {
-      const totalDigits = value.replace(/\D/g, '').length;
+      const totalDigits = clean.replace(/\D/g, '').length;
       const keepAfter = totalDigits - 4;
       let seen = 0;
-      return value.replace(/\d/g, (ch) => {
+      return clean.replace(/\d/g, (ch) => {
         seen++;
         return seen <= keepAfter ? 'X' : ch;
       });
     }
     case 'PAN':
-      return `XXXXX${value.slice(5)}`;
+      return `XXXXX${clean.slice(5)}`;
     case 'EMAIL': {
-      const atIdx = value.indexOf('@');
+      const atIdx = clean.indexOf('@');
       if (atIdx <= 0) return '***';
-      const local = value.slice(0, atIdx);
-      const domain = value.slice(atIdx);
-      return local.length === 1 ? `*${domain}` : `${local[0]}***${domain}`;
+      const localChars = Array.from(clean.slice(0, atIdx));
+      const domain = clean.slice(atIdx);
+      return localChars.length === 1 ? `*${domain}` : `${localChars[0]}***${domain}`;
     }
     case 'PHONE': {
-      const totalDigits = value.replace(/\D/g, '').length;
+      const totalDigits = clean.replace(/\D/g, '').length;
       const keepTail = 4;
       let prefixDigitsToKeep = 0;
-      if (value.trim().startsWith('+')) {
-        const ccMatch = value.trim().match(/^\+(\d{1,3})(?=[\s().-])/);
+      if (clean.trim().startsWith('+')) {
+        const ccMatch = clean.trim().match(/^\+(\d{1,3})(?=[\s().-])/);
         if (ccMatch) prefixDigitsToKeep = ccMatch[1].length;
       }
       let digitIdx = 0;
-      return value.replace(/\d/g, (ch) => {
+      return clean.replace(/\d/g, (ch) => {
         digitIdx++;
         if (digitIdx <= prefixDigitsToKeep) return ch;
         if (digitIdx > totalDigits - keepTail) return ch;
@@ -296,12 +340,12 @@ export function applyPartialMask(type: EntityType, value: string): string {
       });
     }
     case 'IP_ADDRESS': {
-      if (value.includes('.')) {
-        const parts = value.split('.');
+      if (clean.includes('.')) {
+        const parts = clean.split('.');
         if (parts.length === 4) return `${parts[0]}.${parts[1]}.XXX.XXX`;
       }
-      if (value.includes(':')) {
-        const parts = value.split(':');
+      if (clean.includes(':')) {
+        const parts = clean.split(':');
         let kept = 0;
         return parts
           .map((part) => {
@@ -314,8 +358,8 @@ export function applyPartialMask(type: EntityType, value: string): string {
       return '[REDACTED]';
     }
     case 'CUSTOM': {
-      if (value.length <= 4) return '*'.repeat(value.length);
-      return `${value.slice(0, 2)}${'*'.repeat(Math.min(6, value.length - 4))}${value.slice(-2)}`;
+      if (clean.length <= 4) return '*'.repeat(clean.length);
+      return `${clean.slice(0, 2)}${'*'.repeat(Math.min(6, clean.length - 4))}${clean.slice(-2)}`;
     }
   }
 }
@@ -331,6 +375,31 @@ function computeRiskSummary(matches: DetectedEntity[]): RiskSummary {
   return { score, level };
 }
 
+function splitCsvRowCells(row: string): Array<{ start: number; end: number; value: string }> {
+  const cells: Array<{ start: number; end: number; value: string }> = [];
+  let inQuotes = false;
+  let cellStart = 0;
+  for (let i = 0; i < row.length; i++) {
+    const ch = row[i];
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+    } else if (ch === ',' && !inQuotes) {
+      cells.push({
+        start: cellStart,
+        end: i,
+        value: row.slice(cellStart, i).replace(/^"|"$/g, '').trim(),
+      });
+      cellStart = i + 1;
+    }
+  }
+  cells.push({
+    start: cellStart,
+    end: row.length,
+    value: row.slice(cellStart).replace(/^"|"$/g, '').trim(),
+  });
+  return cells;
+}
+
 /**
  * Parses CSV lines (supporting quoted cells) to compute per-column PII exposure.
  */
@@ -338,32 +407,7 @@ function analyzeCsvColumns(text: string, matches: DetectedEntity[]): CsvColumnRi
   const lines = text.split('\n');
   if (lines.length < 2) return [];
 
-  const splitCsvRow = (row: string): Array<{ start: number; end: number; value: string }> => {
-    const cells: Array<{ start: number; end: number; value: string }> = [];
-    let inQuotes = false;
-    let cellStart = 0;
-    for (let i = 0; i < row.length; i++) {
-      const ch = row[i];
-      if (ch === '"') {
-        inQuotes = !inQuotes;
-      } else if (ch === ',' && !inQuotes) {
-        cells.push({
-          start: cellStart,
-          end: i,
-          value: row.slice(cellStart, i).replace(/^"|"$/g, '').trim(),
-        });
-        cellStart = i + 1;
-      }
-    }
-    cells.push({
-      start: cellStart,
-      end: row.length,
-      value: row.slice(cellStart).replace(/^"|"$/g, '').trim(),
-    });
-    return cells;
-  };
-
-  const headers = splitCsvRow(lines[0]);
+  const headers = splitCsvRowCells(lines[0]);
   if (headers.length <= 1) return [];
 
   const columnHits: Array<{ count: number; types: Set<EntityType> }> = headers.map(() => ({
@@ -383,7 +427,7 @@ function analyzeCsvColumns(text: string, matches: DetectedEntity[]): CsvColumnRi
     const lineText = lines[rowIdx];
     const rowMatches = matchesByLine.get(rowIdx + 1);
     if (rowMatches && rowMatches.length > 0 && lineText.trim()) {
-      const cells = splitCsvRow(lineText);
+      const cells = splitCsvRowCells(lineText);
       for (const m of rowMatches) {
         const relStart = m.start - lineOffset;
         const colIdx = cells.findIndex((c) => relStart >= c.start && relStart <= c.end);
@@ -402,6 +446,56 @@ function analyzeCsvColumns(text: string, matches: DetectedEntity[]): CsvColumnRi
     entityCount: columnHits[idx].count,
     types: Array.from(columnHits[idx].types),
   }));
+}
+
+function buildCsvHeaderLookup(text: string): (index: number) => string | null {
+  const firstNl = text.indexOf('\n');
+  if (firstNl === -1) return () => null;
+  const headerLine = text.slice(0, firstNl);
+  if (!headerLine.includes(',')) return () => null;
+  const headers = splitCsvRowCells(headerLine);
+  if (headers.length <= 1) return () => null;
+
+  return (index: number) => {
+    if (index <= firstNl) return null;
+    const lineStart = text.lastIndexOf('\n', index - 1) + 1;
+    const rawLineEnd = text.indexOf('\n', index);
+    const lineEnd = rawLineEnd === -1 ? text.length : rawLineEnd;
+    const row = text.slice(lineStart, lineEnd);
+    const cells = splitCsvRowCells(row);
+    const rel = index - lineStart;
+    const colIdx = cells.findIndex((c) => rel >= c.start && rel <= c.end);
+    return colIdx >= 0 && colIdx < headers.length ? headers[colIdx].value : null;
+  };
+}
+
+function hasBarePhoneContextCue(
+  cleanText: string,
+  start: number,
+  end: number,
+  getCsvHeader: (idx: number) => string | null
+): boolean {
+  const csvHeader = getCsvHeader(start);
+  if (csvHeader && /(?:phone|mobile)/i.test(csvHeader)) return true;
+
+  const lineStart = cleanText.lastIndexOf('\n', start - 1) + 1;
+  const rawLineEnd = cleanText.indexOf('\n', end);
+  const lineEnd = rawLineEnd === -1 ? cleanText.length : rawLineEnd;
+
+  const beforeRaw = cleanText.slice(Math.max(lineStart, start - 80), start);
+  const sepIdx = Math.max(beforeRaw.lastIndexOf('|'), beforeRaw.lastIndexOf(';'));
+  const before = sepIdx >= 0 ? beforeRaw.slice(sepIdx + 1) : beforeRaw;
+
+  const afterRaw = cleanText.slice(end, Math.min(lineEnd, end + 30));
+  const afterSep = afterRaw.search(/[|;]/);
+  const after = afterSep >= 0 ? afterRaw.slice(0, afterSep) : afterRaw;
+
+  // Reject if immediately preceded by an explicit non-phone ID keyword (e.g., "order 8827364519")
+  if (/\b(?:order|id|ref|invoice|txn|batch|ticket|account|acc)\b\s*[:#-]?\s*$/i.test(before)) {
+    return false;
+  }
+
+  return /\b(?:calls?|phones?|mobiles?|tel|telephone|contacts?)\b/i.test(`${before} ${after}`);
 }
 
 function isWordOrDigitBefore(text: string, index: number, extraBlocked = ''): boolean {
@@ -449,6 +543,9 @@ export interface DetectOptions {
   enabledTypes?: Partial<EnabledEntityMap>;
   strictAadhaarVerhoeff?: boolean;
   customPattern?: string;
+  customMatches?: Array<{ start: number; end: number; value: string }>;
+  customRegexErrorOverride?: string | null;
+  skipSyncCustomRegex?: boolean;
   ignoredValues?: string[];
 }
 
@@ -467,77 +564,96 @@ export function detectPII(
   };
   const strictVerhoeff = Boolean(options.strictAadhaarVerhoeff);
   const ignoredSet = new Set(
-    (options.ignoredValues ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean)
+    (options.ignoredValues ?? [])
+      .map((v) => v.replace(ZERO_WIDTH_REGEX, '').trim().toLowerCase())
+      .filter(Boolean)
   );
 
+  const { cleanText, mapSpan } = stripZeroWidthWithMap(text);
   const locate = buildLineLocator(text);
+  const getCsvHeader = buildCsvHeaderLookup(cleanText);
   const candidates: Omit<DetectedEntity, 'id'>[] = [];
   const candidateKeys = new Set<string>();
   const rejectedCandidates: RejectedCandidate[] = [];
   const rejectedKeys = new Set<string>();
-  let customRegexError: string | null = null;
+  let customRegexError: string | null = options.customRegexErrorOverride ?? null;
 
-  const pushCandidate = (item: Omit<DetectedEntity, 'id'>) => {
-    const key = `${item.type}:${item.start}:${item.end}`;
+  const pushMappedCandidate = (
+    cStart: number,
+    cEnd: number,
+    item: Omit<DetectedEntity, 'id' | 'start' | 'end' | 'value' | 'line' | 'column'>
+  ) => {
+    const { start, end } = mapSpan(cStart, cEnd);
+    const key = `${item.type}:${start}:${end}`;
     if (candidateKeys.has(key)) return;
     candidateKeys.add(key);
-    candidates.push(item);
+    const pos = locate(start);
+    candidates.push({
+      ...item,
+      value: text.slice(start, end),
+      start,
+      end,
+      line: pos.line,
+      column: pos.column,
+    });
   };
 
-  const pushRejected = (item: RejectedCandidate) => {
-    const key = `${item.type}:${item.start}:${item.end}`;
+  const pushMappedRejected = (
+    cStart: number,
+    cEnd: number,
+    item: Omit<RejectedCandidate, 'start' | 'end' | 'value' | 'line' | 'column'>
+  ) => {
+    const { start, end } = mapSpan(cStart, cEnd);
+    const key = `${item.type}:${start}:${end}`;
     if (rejectedKeys.has(key)) return;
     rejectedKeys.add(key);
-    rejectedCandidates.push(item);
+    const pos = locate(start);
+    rejectedCandidates.push({
+      ...item,
+      value: text.slice(start, end),
+      start,
+      end,
+      line: pos.line,
+      column: pos.column,
+    });
   };
 
-  // 1. Credit Cards (multi-start, exact group sizes: 4-4-4-4, 4-4-4-4-3, 4-4-4-1, 4-6-5, 4-6-4, and 13-19 contiguous digits)
+  // 1. Credit Cards (multi-start, exact group sizes with ' ', '-', or '.' separators, plus 13-19 contiguous digits)
   if (enabled.CREDIT_CARD) {
     const cardGroupRegexes: RegExp[] = [
       // 4-4-4-4 (16 digits)
-      /^\d{4}([ -])\d{4}\1\d{4}\1\d{4}/,
+      /^\d{4}([ .-])\d{4}\1\d{4}\1\d{4}/,
       // 4-4-4-4-3 (19 digits)
-      /^\d{4}([ -])\d{4}\1\d{4}\1\d{4}\1\d{3}/,
+      /^\d{4}([ .-])\d{4}\1\d{4}\1\d{4}\1\d{3}/,
       // 4-4-4-1 (13 digits)
-      /^\d{4}([ -])\d{4}\1\d{4}\1\d/,
+      /^\d{4}([ .-])\d{4}\1\d{4}\1\d/,
       // 4-6-5 (Amex 15 digits)
-      /^\d{4}([ -])\d{6}\1\d{5}/,
+      /^\d{4}([ .-])\d{6}\1\d{5}/,
       // 4-6-4 (Diners 14 digits)
-      /^\d{4}([ -])\d{6}\1\d{4}/,
+      /^\d{4}([ .-])\d{6}\1\d{4}/,
     ];
 
-    for (let i = 0; i < text.length; i++) {
-      const ch = text[i];
+    for (let i = 0; i < cleanText.length; i++) {
+      const ch = cleanText[i];
       if (ch < '0' || ch > '9') continue;
-      if (isWordOrDigitBefore(text, i, '+')) continue;
+      if (isWordOrDigitBefore(cleanText, i, '+')) continue;
 
-      const slice = text.slice(i, i + 25);
+      const slice = cleanText.slice(i, i + 25);
 
       // Contiguous 13–19 digits
       const contig = slice.match(/^\d{13,19}/);
       if (contig) {
         const raw = contig[0];
         const end = i + raw.length;
-        if (!isWordOrDigitAfter(text, end)) {
-          const pos = locate(i);
+        if (!isWordOrDigitAfter(cleanText, end)) {
           if (isValidLuhn(raw)) {
-            pushCandidate({
+            pushMappedCandidate(i, end, {
               type: 'CREDIT_CARD',
-              value: raw,
-              start: i,
-              end,
-              line: pos.line,
-              column: pos.column,
               validation: `Luhn Valid (${detectCardNetwork(raw)})`,
             });
           } else {
-            pushRejected({
+            pushMappedRejected(i, end, {
               type: 'CREDIT_CARD',
-              value: raw,
-              start: i,
-              end,
-              line: pos.line,
-              column: pos.column,
               reason: 'Failed Luhn checksum (false positive prevented)',
             });
           }
@@ -550,27 +666,16 @@ export function detectPII(
         if (!m) continue;
         const raw = m[0];
         const end = i + raw.length;
-        if (isWordOrDigitAfter(text, end)) continue;
+        if (isWordOrDigitAfter(cleanText, end)) continue;
 
-        const pos = locate(i);
         if (isValidLuhn(raw)) {
-          pushCandidate({
+          pushMappedCandidate(i, end, {
             type: 'CREDIT_CARD',
-            value: raw,
-            start: i,
-            end,
-            line: pos.line,
-            column: pos.column,
             validation: `Luhn Valid (${detectCardNetwork(raw)})`,
           });
         } else if (isCardLikeShape(raw)) {
-          pushRejected({
+          pushMappedRejected(i, end, {
             type: 'CREDIT_CARD',
-            value: raw,
-            start: i,
-            end,
-            line: pos.line,
-            column: pos.column,
             reason: 'Failed Luhn checksum (false positive prevented)',
           });
         }
@@ -578,21 +683,14 @@ export function detectPII(
     }
   }
 
-  // 2. Emails
+  // 2. Emails (supports Unicode letters in local part and domain)
   if (enabled.EMAIL) {
     findRegexMatches(
-      text,
-      /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9])/g,
+      cleanText,
+      /(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}(?![\p{L}\p{N}])/gu,
       (m) => {
-        const start = m.index;
-        const pos = locate(start);
-        pushCandidate({
+        pushMappedCandidate(m.index, m.index + m[0].length, {
           type: 'EMAIL',
-          value: m[0],
-          start,
-          end: start + m[0].length,
-          line: pos.line,
-          column: pos.column,
           validation: 'Email format',
         });
       }
@@ -602,37 +700,23 @@ export function detectPII(
   // 3. IP Addresses (IPv4 & IPv6)
   if (enabled.IP_ADDRESS) {
     findRegexMatches(
-      text,
+      cleanText,
       /(?<![\d.A-Za-z])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\d.A-Za-z])/g,
       (m) => {
-        const start = m.index;
-        const pos = locate(start);
-        pushCandidate({
+        pushMappedCandidate(m.index, m.index + m[0].length, {
           type: 'IP_ADDRESS',
-          value: m[0],
-          start,
-          end: start + m[0].length,
-          line: pos.line,
-          column: pos.column,
           validation: 'IPv4 (0–255 octets)',
         });
       }
     );
 
     findRegexMatches(
-      text,
+      cleanText,
       /(?<![A-Fa-f0-9:])(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}(?![A-Fa-f0-9:])/g,
       (m) => {
         if (!isValidIPv6(m[0])) return;
-        const start = m.index;
-        const pos = locate(start);
-        pushCandidate({
+        pushMappedCandidate(m.index, m.index + m[0].length, {
           type: 'IP_ADDRESS',
-          value: m[0],
-          start,
-          end: start + m[0].length,
-          line: pos.line,
-          column: pos.column,
           validation: 'IPv6 format',
         });
       }
@@ -642,17 +726,10 @@ export function detectPII(
   // 4. Indian PAN
   if (enabled.PAN) {
     const standardHolders = new Set(['P', 'C', 'H', 'F', 'A', 'T', 'B', 'L', 'J', 'G']);
-    findRegexMatches(text, /(?<![A-Za-z0-9])[A-Z]{5}[0-9]{4}[A-Z](?![A-Za-z0-9])/g, (m) => {
-      const start = m.index;
-      const pos = locate(start);
+    findRegexMatches(cleanText, /(?<![A-Za-z0-9])[A-Z]{5}[0-9]{4}[A-Z](?![A-Za-z0-9])/g, (m) => {
       const holder = m[0][3];
-      pushCandidate({
+      pushMappedCandidate(m.index, m.index + m[0].length, {
         type: 'PAN',
-        value: m[0],
-        start,
-        end: start + m[0].length,
-        line: pos.line,
-        column: pos.column,
         validation: standardHolders.has(holder)
           ? `PAN format (holder '${holder}')`
           : 'PAN 5A-4N-1A format',
@@ -662,12 +739,12 @@ export function detectPII(
 
   // 5. Indian Aadhaar (multi-start, exact 4-4-4 and 12-digit forms, optional Verhoeff strictness)
   if (enabled.AADHAAR) {
-    for (let i = 0; i < text.length; i++) {
-      const ch = text[i];
+    for (let i = 0; i < cleanText.length; i++) {
+      const ch = cleanText[i];
       if (ch < '2' || ch > '9') continue;
-      if (isWordOrDigitBefore(text, i, '-')) continue;
+      if (isWordOrDigitBefore(cleanText, i, '-')) continue;
 
-      const slice = text.slice(i, i + 15);
+      const slice = cleanText.slice(i, i + 15);
       const grouped = slice.match(/^[2-9]\d{3}([ -])\d{4}\1\d{4}/);
       const contig = slice.match(/^[2-9]\d{11}/);
 
@@ -677,31 +754,20 @@ export function detectPII(
 
       for (const { raw, sep } of candidatesHere) {
         const end = i + raw.length;
-        if (isWordOrDigitAfter(text, end, '-')) continue;
-        if (sep && isIsolatedFourGroupPrefix(text, i, end, sep)) continue;
+        if (isWordOrDigitAfter(cleanText, end, '-')) continue;
+        if (sep && isIsolatedFourGroupPrefix(cleanText, i, end, sep)) continue;
 
-        const pos = locate(i);
         const verhoeffOk = isValidVerhoeff(raw);
         if (strictVerhoeff && !verhoeffOk) {
-          pushRejected({
+          pushMappedRejected(i, end, {
             type: 'AADHAAR',
-            value: raw,
-            start: i,
-            end,
-            line: pos.line,
-            column: pos.column,
             reason: 'Failed Verhoeff checksum (Strict Aadhaar mode)',
           });
           continue;
         }
 
-        pushCandidate({
+        pushMappedCandidate(i, end, {
           type: 'AADHAAR',
-          value: raw,
-          start: i,
-          end,
-          line: pos.line,
-          column: pos.column,
           validation: verhoeffOk
             ? 'UIDAI Verhoeff Valid'
             : '12-digit UIDAI format (unverified checksum)',
@@ -710,14 +776,14 @@ export function detectPII(
     }
   }
 
-  // 6. Phone Numbers (multi-start + multi-group prefixes for E.164 so trailing entities aren't swallowed)
+  // 6. Phone Numbers
   if (enabled.PHONE) {
-    // 6a. International '+' prefixed phones: emit every valid 1..5 group prefix with 10..15 digits
-    for (let i = 0; i < text.length; i++) {
-      if (text[i] !== '+') continue;
-      if (isWordOrDigitBefore(text, i, '+')) continue;
+    // 6a. International '+' prefixed phones (always on)
+    for (let i = 0; i < cleanText.length; i++) {
+      if (cleanText[i] !== '+') continue;
+      if (isWordOrDigitBefore(cleanText, i, '+')) continue;
 
-      const slice = text.slice(i, i + 32);
+      const slice = cleanText.slice(i, i + 32);
       const ccMatch = slice.match(/^\+\d{1,3}/);
       if (!ccMatch) continue;
 
@@ -728,74 +794,91 @@ export function detectPII(
         if (!nextGroup) break;
         curLen += nextGroup[0].length;
         const end = i + curLen;
-        if (isWordOrDigitAfter(text, end)) continue;
+        if (isWordOrDigitAfter(cleanText, end)) continue;
 
         const raw = slice.slice(0, curLen);
         const digits = raw.replace(/\D/g, '');
         if (digits.length >= 10 && digits.length <= 15) {
-          const pos = locate(i);
-          pushCandidate({
+          pushMappedCandidate(i, end, {
             type: 'PHONE',
-            value: raw,
-            start: i,
-            end,
-            line: pos.line,
-            column: pos.column,
             validation: 'International E.164 phone',
           });
         }
       }
     }
 
-    // 6b. Local & formatted phone patterns (multi-start via regex without greedy over-consumption)
-    const localPhonePatterns = [
+    // 6b. Prefixed & formatted local/landline phone patterns (always on)
+    const prefixedAndFormattedPatterns = [
+      // Parenthesized area code: (415) 555-0199
       /(?<![\dA-Za-z(])\(\d{3,5}\)[ .-]?\d{3,4}[ .-]?\d{4}(?![\dA-Za-z])/g,
-      /(?<![\dA-Za-z-])(?:\d{5}[ .-]\d{5}|\d{3}[ .-]\d{3}[ .-]\d{4}|0\d{2,4}[ .-]\d{6,8})(?![\dA-Za-z-])/g,
-      /(?<![\dA-Za-z+-])(?:0?[6-9]\d{9})(?![\dA-Za-z-])/g,
+      // Space/dash/dot-separated Indian STD landlines (0 + 2-4 digit STD + 6-8 digit subscriber, e.g. 011 2345 6789, 022-26541234)
+      /(?<![\dA-Za-z-])0\d{2,4}[ .-]\d{3,4}[ .-]?\d{3,4}(?![\dA-Za-z-])/g,
+      // Separated 10-digit formats: 98765-43210, 555-123-4567
+      /(?<![\dA-Za-z-])(?:\d{5}[ .-]\d{5}|\d{3}[ .-]\d{3}[ .-]\d{4})(?![\dA-Za-z-])/g,
+      // 0-prefixed 11-digit mobile: 09876543210
+      /(?<![\dA-Za-z+-])0[6-9]\d{9}(?![\dA-Za-z-])/g,
     ];
 
-    for (const pattern of localPhonePatterns) {
-      findRegexMatches(text, pattern, (m) => {
+    for (const pattern of prefixedAndFormattedPatterns) {
+      findRegexMatches(cleanText, pattern, (m) => {
         const raw = m[0];
         const digits = raw.replace(/\D/g, '');
         if (digits.length < 10 || digits.length > 15) return;
-        const start = m.index;
-        const end = start + raw.length;
-        const pos = locate(start);
-        pushCandidate({
+        // STD landlines with spaces/hyphens are 10-11 digits total
+        if (raw.startsWith('0') && digits.length > 11) return;
+        pushMappedCandidate(m.index, m.index + raw.length, {
           type: 'PHONE',
-          value: raw,
-          start,
-          end,
-          line: pos.line,
-          column: pos.column,
-          validation: '10+ digit phone format',
+          validation: raw.startsWith('0') ? 'STD / 0-prefixed phone' : 'Formatted phone number',
         });
       });
     }
+
+    // 6c. Bare 10-digit numbers without +91 or 0 prefix: require context cue word or CSV phone/mobile column
+    findRegexMatches(cleanText, /(?<![\dA-Za-z+-])[6-9]\d{9}(?![\dA-Za-z-])/g, (m) => {
+      const start = m.index;
+      const end = start + m[0].length;
+      if (!hasBarePhoneContextCue(cleanText, start, end, getCsvHeader)) return;
+      pushMappedCandidate(start, end, {
+        type: 'PHONE',
+        validation: '10-digit mobile (context verified)',
+      });
+    });
   }
 
-  // 7. Optional Custom User Regex
-  if (enabled.CUSTOM && options.customPattern && options.customPattern.trim()) {
-    try {
-      const customRe = new RegExp(options.customPattern.trim(), 'g');
-      findRegexMatches(text, customRe, (m) => {
-        // Ignore multiline matches to keep line-by-line diff exact
-        if (m[0].includes('\n')) return;
-        const start = m.index;
-        const pos = locate(start);
-        pushCandidate({
-          type: 'CUSTOM',
-          value: m[0],
-          start,
-          end: start + m[0].length,
-          line: pos.line,
-          column: pos.column,
-          validation: 'Custom regex pattern',
+  // 7. Optional Custom User Regex (supplied from Web Worker or sync fallback)
+  if (enabled.CUSTOM) {
+    if (options.customMatches) {
+      for (const cm of options.customMatches) {
+        if (cm.end > cm.start && !cm.value.includes('\n')) {
+          const pos = locate(cm.start);
+          const key = `CUSTOM:${cm.start}:${cm.end}`;
+          if (!candidateKeys.has(key)) {
+            candidateKeys.add(key);
+            candidates.push({
+              type: 'CUSTOM',
+              value: text.slice(cm.start, cm.end),
+              start: cm.start,
+              end: cm.end,
+              line: pos.line,
+              column: pos.column,
+              validation: 'Custom regex pattern (worker)',
+            });
+          }
+        }
+      }
+    } else if (!options.skipSyncCustomRegex && options.customPattern && options.customPattern.trim()) {
+      try {
+        const customRe = new RegExp(options.customPattern.trim(), 'g');
+        findRegexMatches(cleanText, customRe, (m) => {
+          if (m[0].includes('\n')) return;
+          pushMappedCandidate(m.index, m.index + m[0].length, {
+            type: 'CUSTOM',
+            validation: 'Custom regex pattern',
+          });
         });
-      });
-    } catch (err) {
-      customRegexError = err instanceof Error ? err.message : 'Invalid regular expression';
+      } catch (err) {
+        customRegexError = err instanceof Error ? err.message : 'Invalid regular expression';
+      }
     }
   }
 
@@ -803,7 +886,7 @@ export function detectPII(
   const activeCandidates: Omit<DetectedEntity, 'id'>[] = [];
   const ignoredSpans: Array<{ start: number; end: number }> = [];
   for (const c of candidates) {
-    if (ignoredSet.has(c.value.trim().toLowerCase())) {
+    if (ignoredSet.has(c.value.replace(ZERO_WIDTH_REGEX, '').trim().toLowerCase())) {
       ignoredSpans.push({ start: c.start, end: c.end });
     } else {
       activeCandidates.push(c);
@@ -935,6 +1018,9 @@ export function sanitizeText(text: string, options: SanitizeOptions = {}): Sanit
     enabledTypes: options.enabledTypes,
     strictAadhaarVerhoeff: options.strictAadhaarVerhoeff,
     customPattern: options.customPattern,
+    customMatches: options.customMatches,
+    customRegexErrorOverride: options.customRegexErrorOverride,
+    skipSyncCustomRegex: options.skipSyncCustomRegex,
     ignoredValues: options.ignoredValues,
   });
 

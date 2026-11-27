@@ -1,4 +1,4 @@
-name: CI
+name: CI & Security Checks
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  test-and-build:
+  test-build-security:
     runs-on: ubuntu-latest
 
     steps:
@@ -28,3 +28,21 @@ jobs:
 
       - name: Typecheck and build
         run: npm run build
+
+      - name: Dependency vulnerability audit (high/critical)
+        run: npm audit --audit-level=high
+
+      - name: Verify zero external URLs in built assets and CSP connect-src 'none'
+        run: |
+          grep -q "connect-src 'none'" dist/index.html
+          if grep -rnE "https?://" src/ dist/index.html; then
+            echo "ERROR: External URL detected in client bundle or source!"
+            exit 1
+          fi
+
+      - name: Scan repository for leaked secrets or private keys
+        run: |
+          if grep -rnE "(AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{36}|github_pat_[0-9A-Za-z_]{22,}|xox[baprs]-[0-9A-Za-z-]{10,}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY)" src/ index.html package.json; then
+            echo "ERROR: Potential secret detected!"
+            exit 1
+          fi

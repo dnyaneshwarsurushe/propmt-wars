@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -16,13 +16,25 @@ import { AuditTabs } from './components/AuditTabs';
 import { DiffViewer } from './components/DiffViewer';
 import { DEFAULT_SAMPLE_ID, SAMPLES, type SampleDataset } from './data/samples';
 import {
+  CUSTOM_REGEX_TIMEOUT_MS,
+  runCustomRegexInWorker,
+} from './engine/customRegexRunner';
+import {
   DEFAULT_ENABLED_TYPES,
   ENTITY_META,
   ENTITY_ORDER,
   applyPartialMask,
   sanitizeText,
+  stripZeroWidthWithMap,
 } from './engine/piiEngine';
-import type { EnabledEntityMap, EntityType, RedactionMode } from './engine/types';
+import type {
+  CustomMatchSpan,
+  EnabledEntityMap,
+  EntityType,
+  RedactionMode,
+} from './engine/types';
+
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5 MB client-side safety guard
 
 const MODE_OPTIONS: Array<{ id: RedactionMode; title: string; preview: string }> = [
   { id: 'full', title: 'Full Mask', preview: '[REDACTED]' },
@@ -38,6 +50,8 @@ export function App() {
   const [typedFullMask, setTypedFullMask] = useState(false);
   const [strictAadhaarVerhoeff, setStrictAadhaarVerhoeff] = useState(false);
   const [customPattern, setCustomPattern] = useState('');
+  const [customMatches, setCustomMatches] = useState<CustomMatchSpan[]>([]);
+  const [customWorkerError, setCustomWorkerError] = useState<string | null>(null);
   const [showCustomRule, setShowCustomRule] = useState(false);
   const [ignoredValues, setIgnoredValues] = useState<string[]>([]);
   const [enabledTypes, setEnabledTypes] = useState<EnabledEntityMap>(DEFAULT_ENABLED_TYPES);
@@ -58,6 +72,39 @@ export function App() {
 
   const isCsv = filename.toLowerCase().endsWith('.csv');
 
+  // Execute custom regex in an isolated Web Worker with a 500 ms ReDoS timeout
+  useEffect(() => {
+    let cancelled = false;
+    const trimmed = customPattern.trim();
+
+    if (!enabledTypes.CUSTOM || !trimmed || !rawText) {
+      setCustomMatches([]);
+      setCustomWorkerError(null);
+      return;
+    }
+
+    setCustomMatches([]);
+    setCustomWorkerError(null);
+    const { cleanText, mapSpan } = stripZeroWidthWithMap(rawText);
+    void runCustomRegexInWorker(cleanText, trimmed, CUSTOM_REGEX_TIMEOUT_MS).then((res) => {
+      if (cancelled) return;
+      const mappedMatches = res.matches.map((m) => {
+        const { start, end } = mapSpan(m.start, m.end);
+        return {
+          start,
+          end,
+          value: rawText.slice(start, end),
+        };
+      });
+      setCustomMatches(mappedMatches);
+      setCustomWorkerError(res.customRegexError);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [rawText, customPattern, enabledTypes.CUSTOM]);
+
   const result = useMemo(
     () =>
       sanitizeText(rawText, {
@@ -66,10 +113,24 @@ export function App() {
         typedFullMask,
         strictAadhaarVerhoeff,
         customPattern,
+        customMatches,
+        customRegexErrorOverride: customWorkerError,
+        skipSyncCustomRegex: true,
         ignoredValues,
         isCsv,
       }),
-    [rawText, mode, enabledTypes, typedFullMask, strictAadhaarVerhoeff, customPattern, ignoredValues, isCsv]
+    [
+      rawText,
+      mode,
+      enabledTypes,
+      typedFullMask,
+      strictAadhaarVerhoeff,
+      customPattern,
+      customMatches,
+      customWorkerError,
+      ignoredValues,
+      isCsv,
+    ]
   );
 
   const csvSummary = useMemo(() => {
@@ -90,6 +151,10 @@ export function App() {
 
   const handleFile = (file: File | undefined) => {
     if (!file) return;
+    if (file.size > MAX_UPLOAD_BYTES) {
+      notify('File exceeds 5 MB client-side safety limit.');
+      return;
+    }
     const isTextOrCsv = /\.(txt|csv)$/i.test(file.name) || file.type.startsWith('text/');
     if (!isTextOrCsv) {
       notify('Please upload a .txt or .csv file.');
