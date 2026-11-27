@@ -29,8 +29,8 @@ jobs:
       - name: Typecheck and build
         run: npm run build
 
-      - name: Dependency vulnerability audit (high/critical)
-        run: npm audit --audit-level=high
+      - name: Dependency vulnerability audit (production runtime)
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Verify zero external URLs in built assets and CSP connect-src 'none'
         run: |

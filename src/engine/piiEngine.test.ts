@@ -423,3 +423,23 @@ describe('Custom Regex Worker Timeout (ReDoS Protection)', () => {
     expect(result.customRegexError).toBe(CUSTOM_REGEX_TIMEOUT_ERROR);
   });
 });
+
+describe('Security Hardening: Linear Scaling & Canonical Pseudonyms', () => {
+  it('canonicalizes Indian phone formats and compressed/expanded IPv6 to one pseudonym each', () => {
+    const input =
+      'Call 9820144510, 09820144510, and +91 98201 44510 | IPs 2001:db8::1 and 2001:0db8:0000:0000:0000:0000:0000:0001';
+    const res = sanitizeText(input, { mode: 'pseudonym' });
+    const phoneMaps = res.pseudonymMappings.filter((m) => m.type === 'PHONE');
+    const ipMaps = res.pseudonymMappings.filter((m) => m.type === 'IP_ADDRESS');
+    expect(phoneMaps).toHaveLength(1);
+    expect(phoneMaps[0].occurrences).toBe(3);
+    expect(ipMaps).toHaveLength(1);
+    expect(ipMaps[0].occurrences).toBe(2);
+  });
+
+  it('handles 10,000 repeated 4-digit groups in linear time without quadratic slowdown', () => {
+    const repeated = '4111 '.repeat(10000);
+    const res = sanitizeText(repeated, { mode: 'full' });
+    expect(res.durationMs).toBeLessThan(500);
+  });
+});

@@ -60,6 +60,7 @@ export function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [editorCollapsed, setEditorCollapsed] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const [clearSignal, setClearSignal] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -164,13 +165,46 @@ export function App() {
       return;
     }
     const reader = new FileReader();
+    reader.onerror = () => {
+      notify('Failed to read file locally. Check file permissions or encoding.');
+    };
     reader.onload = (ev) => {
-      setRawText(String(ev.target?.result ?? ''));
+      const buffer = ev.target?.result;
+      if (!(buffer instanceof ArrayBuffer)) {
+        notify('Unsupported file read result.');
+        return;
+      }
+      const bytes = new Uint8Array(buffer);
+      let encoding: 'utf-8' | 'utf-16le' | 'utf-16be' = 'utf-8';
+      let offset = 0;
+
+      if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+        encoding = 'utf-16le';
+        offset = 2;
+      } else if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+        encoding = 'utf-16be';
+        offset = 2;
+      } else {
+        if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+          offset = 3;
+        }
+        // Reject binary files disguised as .txt/.csv (null byte check)
+        const probeLimit = Math.min(bytes.length, 8192);
+        for (let i = offset; i < probeLimit; i++) {
+          if (bytes[i] === 0) {
+            notify('Binary file detected. Please upload plain UTF-8/UTF-16 .txt or .csv text.');
+            return;
+          }
+        }
+      }
+
+      const decoded = new TextDecoder(encoding).decode(bytes.subarray(offset));
+      setRawText(decoded);
       setFilename(file.name);
       setSelectedId(null);
       notify(`Loaded ${file.name} locally in browser memory`);
     };
-    reader.readAsText(file);
+    reader.readAsArrayBuffer(file);
   };
 
   const toggleEntity = (type: EntityType) => {
@@ -210,10 +244,20 @@ export function App() {
     URL.revokeObjectURL(url);
   };
 
+  const getSafeFilenameBase = (rawName: string): string => {
+    const dot = rawName.lastIndexOf('.');
+    const rawBase = dot > 0 ? rawName.slice(0, dot) : rawName;
+    const cleaned = sanitizeText(rawBase, {
+      mode: 'full',
+      fullMaskToken: 'redacted',
+      strictPhoneContext: false,
+    }).sanitizedText;
+    return cleaned.replace(/[^A-Za-z0-9._-]+/g, '_') || 'sanitized_output';
+  };
+
   const handleDownloadSanitized = () => {
-    const dot = filename.lastIndexOf('.');
-    const base = dot > 0 ? filename.slice(0, dot) : filename;
-    const outName = `${base}_sanitized${isCsv ? '.csv' : '.txt'}`;
+    const safeBase = getSafeFilenameBase(filename);
+    const outName = `${safeBase}_sanitized${isCsv ? '.csv' : '.txt'}`;
     triggerDownload(
       result.sanitizedText,
       outName,
@@ -223,9 +267,10 @@ export function App() {
   };
 
   const handleDownloadAuditJson = () => {
+    const safeSourceName = `${getSafeFilenameBase(filename)}${isCsv ? '.csv' : '.txt'}`;
     const report = {
       generatedAt: new Date().toISOString(),
-      sourceFilename: filename,
+      sourceFilename: safeSourceName,
       mode,
       riskSummary: result.risk,
       counts: result.counts,
@@ -242,7 +287,7 @@ export function App() {
         line: r.line,
         column: r.column,
         type: r.type,
-        value: r.value,
+        safePreview: applyPartialMask(r.type, r.value),
         reason: r.reason,
       })),
     };
@@ -328,6 +373,9 @@ export function App() {
                 setRawText('');
                 setFilename('pasted_text.txt');
                 setSelectedId(null);
+                setCustomMatches([]);
+                setCustomWorkerError(null);
+                setClearSignal((c) => c + 1);
               }}
               disabled={!rawText}
             >
@@ -576,7 +624,13 @@ export function App() {
               spellCheck={false}
               value={rawText}
               onChange={(e) => {
-                setRawText(e.target.value);
+                const next = e.target.value;
+                if (next.length > MAX_UPLOAD_BYTES) {
+                  setRawText(next.slice(0, MAX_UPLOAD_BYTES));
+                  notify('Input truncated at 5 MB client-side safety limit.');
+                } else {
+                  setRawText(next);
+                }
                 setSelectedId(null);
               }}
               placeholder="Paste logs, resumes, support tickets, clinical notes, or CSV data here — or click 'Load Sample Text'..."
@@ -601,6 +655,7 @@ export function App() {
         <AuditTabs
           result={result}
           selectedId={selectedId}
+          resetSignal={clearSignal}
           onSelectEntity={setSelectedId}
           onIgnoreValue={handleIgnoreValue}
           onDownloadAuditJson={handleDownloadAuditJson}

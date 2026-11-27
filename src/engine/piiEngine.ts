@@ -284,18 +284,35 @@ function buildLineLocator(text: string): (index: number) => { line: number; colu
   };
 }
 
+function canonicalizeIPv6(raw: string): string {
+  const lower = raw.trim().toLowerCase();
+  const halves = lower.split('::');
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = halves.length === 2 ? Math.max(0, 8 - (left.length + right.length)) : 0;
+  const full = [...left, ...Array(missing).fill('0'), ...right];
+  return full.map((g) => g.padStart(4, '0')).join(':');
+}
+
 export function normalizeValue(type: EntityType, value: string): string {
   const clean = value.replace(ZERO_WIDTH_REGEX, '');
   switch (type) {
     case 'EMAIL':
-    case 'IP_ADDRESS':
       return clean.trim().toLowerCase();
+    case 'IP_ADDRESS':
+      return clean.includes(':') ? canonicalizeIPv6(clean) : clean.trim().toLowerCase();
     case 'PAN':
       return clean.trim().toUpperCase();
     case 'AADHAAR':
     case 'CREDIT_CARD':
-    case 'PHONE':
       return clean.replace(/\D/g, '');
+    case 'PHONE': {
+      const digits = clean.replace(/\D/g, '');
+      // Canonicalize Indian 10-digit ([6-9]xxxxxxxxx), 0-prefixed (0[6-9]...), and +91/91-prefixed numbers
+      if (digits.length === 10 && /^[6-9]\d{9}$/.test(digits)) return `91${digits}`;
+      if (digits.length === 11 && /^0[6-9]\d{9}$/.test(digits)) return `91${digits.slice(1)}`;
+      return digits;
+    }
     case 'CUSTOM':
       return clean.trim();
   }
@@ -511,32 +528,41 @@ function isWordOrDigitAfter(text: string, index: number, extraBlocked = ''): boo
 }
 
 /**
- * Checks whether a 4-4-4 Aadhaar candidate is strictly the prefix of an isolated
- * 4-group (4-4-4-4) 16-digit block so non-Luhn 16-digit IDs aren't sliced,
- * while 7-group (4-4-4 + 4-4-4-4) Aadhaar+Card sequences remain detectable.
+ * Precomputes start indices of isolated 4-group (4-4-4-4) 16-digit blocks in O(N) time
+ * so non-Luhn 16-digit IDs aren't sliced into 12-digit Aadhaars, while longer runs
+ * (such as 7-group Aadhaar + Card sequences) remain detectable without O(N^2) scans.
  */
-function isIsolatedFourGroupPrefix(text: string, start: number, end: number, sep: string): boolean {
-  const isFourDigits = (idx: number) => /^\d{4}$/.test(text.slice(idx, idx + 4));
-  let leading = 0;
-  let pos = start;
-  while (pos >= 5 && text[pos - 1] === sep && isFourDigits(pos - 5) && !isWordOrDigitBefore(text, pos - 5, '-')) {
-    leading++;
-    pos -= 5;
-  }
+function buildIsolatedFourGroupStarts(text: string): Set<number> {
+  const isolatedStarts = new Set<number>();
+  const isDigit = (idx: number) => idx >= 0 && idx < text.length && text[idx] >= '0' && text[idx] <= '9';
+  const isFourDigits = (idx: number) =>
+    idx + 4 <= text.length && isDigit(idx) && isDigit(idx + 1) && isDigit(idx + 2) && isDigit(idx + 3);
 
-  let trailing = 0;
-  pos = end;
-  while (
-    pos + 5 <= text.length &&
-    text[pos] === sep &&
-    isFourDigits(pos + 1) &&
-    !isWordOrDigitAfter(text, pos + 5, '-')
-  ) {
-    trailing++;
-    pos += 5;
+  for (const sep of [' ', '-']) {
+    let i = 0;
+    while (i + 19 <= text.length) {
+      if (!isFourDigits(i) || isWordOrDigitBefore(text, i, '-') || isWordOrDigitAfter(text, i + 4, '-')) {
+        i++;
+        continue;
+      }
+      let groupCount = 1;
+      let end = i + 4;
+      while (
+        end + 5 <= text.length &&
+        text[end] === sep &&
+        isFourDigits(end + 1) &&
+        !isWordOrDigitAfter(text, end + 5, '-')
+      ) {
+        groupCount++;
+        end += 5;
+      }
+      if (groupCount === 4 && !isWordOrDigitAfter(text, end, '-')) {
+        isolatedStarts.add(i);
+      }
+      i = end + 1;
+    }
   }
-
-  return leading + 3 + trailing === 4;
+  return isolatedStarts;
 }
 
 export interface DetectOptions {
@@ -740,6 +766,7 @@ export function detectPII(
 
   // 5. Indian Aadhaar (multi-start, exact 4-4-4 and 12-digit forms, optional Verhoeff strictness)
   if (enabled.AADHAAR) {
+    const isolatedFourGroupStarts = buildIsolatedFourGroupStarts(cleanText);
     for (let i = 0; i < cleanText.length; i++) {
       const ch = cleanText[i];
       if (ch < '2' || ch > '9') continue;
@@ -756,7 +783,7 @@ export function detectPII(
       for (const { raw, sep } of candidatesHere) {
         const end = i + raw.length;
         if (isWordOrDigitAfter(cleanText, end, '-')) continue;
-        if (sep && isIsolatedFourGroupPrefix(cleanText, i, end, sep)) continue;
+        if (sep && isolatedFourGroupStarts.has(i)) continue;
 
         const verhoeffOk = isValidVerhoeff(raw);
         if (strictVerhoeff && !verhoeffOk) {
@@ -997,15 +1024,17 @@ export function detectPII(
     });
   }
 
-  // Keep only rejected candidates that do not overlap any accepted match, deduplicated cleanly
-  const nonOverlappingRejected = rejectedCandidates
-    .filter((r) => !matches.some((m) => r.start < m.end && r.end > m.start))
-    .sort((a, b) => a.start - b.start || b.end - b.start - (a.end - a.start));
-
+  // Keep only rejected candidates that do not overlap any accepted match using an O(R log R + M) two-pointer sweep
+  rejectedCandidates.sort((a, b) => a.start - b.start || b.end - b.start - (a.end - a.start));
   const rejected: RejectedCandidate[] = [];
   let lastRejEnd = -1;
-  for (const r of nonOverlappingRejected) {
-    if (r.start >= lastRejEnd) {
+  let matchIdx = 0;
+  for (const r of rejectedCandidates) {
+    while (matchIdx < matches.length && matches[matchIdx].end <= r.start) {
+      matchIdx++;
+    }
+    const overlapsAccepted = matchIdx < matches.length && matches[matchIdx].start < r.end;
+    if (!overlapsAccepted && r.start >= lastRejEnd) {
       rejected.push(r);
       lastRejEnd = r.end;
     }

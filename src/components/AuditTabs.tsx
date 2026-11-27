@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { EyeOff, FileJson, Search, ShieldAlert, ShieldCheck, Table2 } from 'lucide-react';
 import { ENTITY_META, applyPartialMask } from '../engine/piiEngine';
 import type { SanitizationResult } from '../engine/types';
@@ -6,6 +6,7 @@ import type { SanitizationResult } from '../engine/types';
 interface AuditTabsProps {
   result: SanitizationResult;
   selectedId: string | null;
+  resetSignal?: number;
   onSelectEntity: (id: string | null) => void;
   onIgnoreValue: (value: string) => void;
   onDownloadAuditJson: () => void;
@@ -16,12 +17,17 @@ type TabId = 'audit' | 'mapping' | 'luhn' | 'csv' | 'prompt';
 export const AuditTabs: React.FC<AuditTabsProps> = ({
   result,
   selectedId,
+  resetSignal = 0,
   onSelectEntity,
   onIgnoreValue,
   onDownloadAuditJson,
 }) => {
   const [activeTab, setActiveTab] = useState<TabId>('audit');
   const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    setSearchQuery('');
+  }, [resetSignal]);
 
   const filteredMatches = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -252,7 +258,7 @@ export const AuditTabs: React.FC<AuditTabsProps> = ({
                     <th>#</th>
                     <th>Line : Col</th>
                     <th>Type</th>
-                    <th>Candidate String</th>
+                    <th>Candidate (Safe Preview)</th>
                     <th>Rejection Reason</th>
                   </tr>
                 </thead>
@@ -275,7 +281,7 @@ export const AuditTabs: React.FC<AuditTabsProps> = ({
                             {ENTITY_META[r.type].shortLabel}
                           </span>
                         </td>
-                        <td className="mono">{r.value}</td>
+                        <td className="mono">{applyPartialMask(r.type, r.value)}</td>
                         <td>{r.reason}</td>
                       </tr>
                     ))

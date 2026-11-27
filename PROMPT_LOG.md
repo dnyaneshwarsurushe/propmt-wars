@@ -87,3 +87,14 @@ This log records every chronological prompt iteration, what the model built or c
   - Completed a read-only 8-area security review (`SEC-01`–`SEC-11`) verifying network isolation while surfacing local leaks, $O(N^2)$ edge cases, and bare-phone recall trade-offs.
   - Reverted bare `[6-9]\d{9}` phone detection in `src/engine/piiEngine.ts` to always detect by default (ranking cue-word matches as `high confidence` and bare patterns as `medium confidence` in the audit table) while still excluding dates and epoch timestamps.
   - Added an opt-in **`Strict phone context`** toggle (OFF by default) in `src/App.tsx` and `strictPhoneContext` option in `src/engine/types.ts`, plus Vitest coverage proving `9876543210` is redacted both alone and adjacent to cards/Aadhaar/PAN.
+
+---
+
+## Iteration 7 — Security Hardening (SEC-01, SEC-02, SEC-04, SEC-06, SEC-08, SEC-09, SEC-10, SEC-11)
+- **Exact Prompt**:
+  > `give` *(requesting implementation of the security audit's prioritised fixes)*
+- **What the Model Changed**:
+  - **Masked Rejected Values (`SEC-01`)**: Replaced raw `r.value` with `applyPartialMask(r.type, r.value)` in both `handleDownloadAuditJson` (`src/App.tsx`) and the Checksum Rejected table (`src/components/AuditTabs.tsx`).
+  - **Eliminated $O(N^2)$ DoS (`SEC-02`)**: Replaced per-offset backward/forward scanning with $O(N)$ `buildIsolatedFourGroupStarts` precomputation and replaced nested `matches.some(...)` with a two-pointer sweep over sorted spans.
+  - **Canonical Pseudonyms (`SEC-08`)**: Canonicalized Indian 10-digit/0-prefixed/+91 phone numbers to `91` + 10 digits and expanded IPv6 addresses (`canonicalizeIPv6`) in `normalizeValue`.
+  - **Upload, Paste, Filename & CI Hardening (`SEC-04`, `SEC-06`, `SEC-09`, `SEC-10`, `SEC-11`)**: Sanitized exported filenames (`getSafeFilenameBase`), enforced the 5 MB safety cap on textarea input, added `FileReader.onerror` + UTF-16 BOM decoding + null-byte binary rejection, reset `AuditTabs` search on Clear, and updated CI audit to `npm audit --omit=dev --audit-level=high`.
